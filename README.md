@@ -34,4 +34,4 @@ If you wish to cite this paper:
   year={2023}
 }
 ```
-![alt text](https://github.com/razla/QuEry-Attack/blob/master/figures/examples.png)
+![alt text](https://github.com/razla/I-See-Dead-People-Gray-Box-Adversarial-Attack-on-Image-To-Text-Models/blob/main/figures/examples.png)
