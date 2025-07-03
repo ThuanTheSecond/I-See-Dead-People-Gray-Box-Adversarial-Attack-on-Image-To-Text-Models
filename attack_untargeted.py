@@ -79,7 +79,7 @@ def uap_sgd(model, tokenizer, image_processor, clip_model, clip_preprocessor, lo
         # Define the optimizer
         optimizer = Adam([noise], lr=lr)
         # Define the scheduler
-        scheduler = ReduceLROnPlateau(optimizer=optimizer, patience=30, factor=0.1, cooldown=30, verbose=True)
+        scheduler = ReduceLROnPlateau(optimizer=optimizer, patience=30, factor=0.1, cooldown=30)
         
         # Save the original image embedding
         x_emb = encoder(x)[1].detach()

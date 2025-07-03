@@ -14,12 +14,14 @@ from dataset import ImageNet
 from dataset import Flickr30k
 
 ######## Change this to your own paths ########
-FLICKR_PATH = "/cs_storage/public_datasets/flickr30k-labels/results_new.csv"
+#FLICKR_PATH = "/cs_storage/public_datasets/flickr30k-labels/results_new.csv"
+FLICKR_PATH = "flickr30k/Images/results.csv"
 
 def load_dataset(dataset, image_processsor, batch_size=6):
     match dataset:
         case 'flickr30k':
-            dataframe = pd.read_csv(FLICKR_PATH)
+            dataframe = pd.read_csv(FLICKR_PATH, sep="|", skipinitialspace=True)
+            dataframe = dataframe.rename(columns={"image_name": "image", "comment": "caption"})
             dataset = Flickr30k(
                 dataframe["image"].values,
                 dataframe["caption"].values,

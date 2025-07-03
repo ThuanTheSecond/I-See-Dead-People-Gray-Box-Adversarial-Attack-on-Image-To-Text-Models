@@ -55,7 +55,7 @@ class Flickr30k(Dataset):
 
     def __getitem__(self, idx):
         item = {}
-        image = Image.open(f"/cs_storage/public_datasets/flickr30k-images/{self.image_filenames[idx]}").convert("RGB")
+        image = Image.open(f"flickr30k/Images/{self.image_filenames[idx]}").convert("RGB")
         if self.transform:
             image = self.transform(images=image, return_tensors="pt").pixel_values.squeeze(0)
         item['image'] = image.float()

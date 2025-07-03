@@ -76,7 +76,7 @@ def uap_sgd(model, model_name, encoder, tokenizer, image_processor, image_mean, 
         # Define the optimizer
         optimizer = Adam([noise], lr=lr)
         # Define the scheduler
-        scheduler = ReduceLROnPlateau(optimizer=optimizer, patience=30, factor=0.1, cooldown=30, verbose=True)
+        scheduler = ReduceLROnPlateau(optimizer=optimizer, patience=30, factor=0.1, cooldown=30)
         
         # Save the original target image embedding
         with torch.no_grad():
