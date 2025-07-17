@@ -30,6 +30,7 @@ def uap_sgd(model, model_name, encoder, tokenizer, image_processor, image_mean, 
     '''
     total_losses = []
     clip_losses = []
+    target_similarities = []  # NEW: Track target caption similarities
     # image encoder
     encoder = encoder.cuda()
     # imgs counter
@@ -64,6 +65,10 @@ def uap_sgd(model, model_name, encoder, tokenizer, image_processor, image_mean, 
         with torch.no_grad():
             y_true_emb = clip_model.encode_text(true_texts) 
             x_true_emb = clip_model.encode_image(F2.resize(x, (224, 224), antialias=True))
+            
+            # NEW: Pre-compute target text embedding for similarity calculation
+            target_tokenized = clip.tokenize([y[0]]).cuda()  # y[0] is the target caption
+            target_text_emb = clip_model.encode_text(target_tokenized)
         
         clip_score_before = F.cosine_similarity(x_true_emb, y_true_emb).mean()
         
@@ -127,22 +132,29 @@ def uap_sgd(model, model_name, encoder, tokenizer, image_processor, image_mean, 
         adv_pred = predict(model_name, model, tokenizer, image_processor, x_adv)
         print(f'After attack:\n\t{adv_pred}')
         
+        # NEW: Enhanced evaluation with target caption similarity
         adv_tokenized = clip.tokenize(adv_pred).cuda()
         with torch.no_grad():
             y_adv_emb = clip_model.encode_text(adv_tokenized) 
             x_adv_emb = clip_model.encode_image(F2.resize(x_adv, (224, 224), antialias=True))
+            
+            # Calculate target caption similarity
+            target_similarity_final = F.cosine_similarity(y_adv_emb, target_text_emb).mean()
         
         clip_score_after = F.cosine_similarity(x_adv_emb, y_adv_emb).mean()
         
         save_img_and_text(F2.resize(x_adv[0], (224, 224)), adv_pred, image_mean, image_std, eps, i, target_img=False, targeted=True, adv=True)
         total_losses.append(cur_losses)
         clip_losses.append((clip_score_before, clip_score_after))
-        #print(f'Total current losses: {cur_losses}')
-        print(f'CLIP loss before and after: {clip_score_before, clip_score_after}')
+        target_similarities.append(target_similarity_final.item())  # NEW: Store target similarity
+        
+        # Enhanced logging
+        print(f'CLIP loss before and after: {clip_score_before.item():.4f}, {clip_score_after.item():.4f}')
+        print(f'Target caption similarity: {target_similarity_final.item():.4f}')  # NEW: Log target similarity
         
         torch.cuda.empty_cache()
         
-    return total_losses, clip_losses
+    return total_losses, clip_losses, target_similarities  # NEW: Return target similarities
 
 if __name__ == '__main__':    
     parser = argparse.ArgumentParser(description="Image-to-Text Attack")
@@ -170,7 +182,8 @@ if __name__ == '__main__':
     image_processor, tokenizer, model, encoder, image_mean, image_std = load_model(model_name=model_name)
     dataloader = load_dataset(dataset, image_processor, batch_size=6)
     
-    total_losses, clip_losses = uap_sgd(model=model,
+    # NEW: Receive target similarities from the function
+    total_losses, clip_losses, target_similarities = uap_sgd(model=model,
                                         model_name=model_name,
                                         encoder=encoder,
                                         tokenizer=tokenizer,
@@ -202,6 +215,22 @@ if __name__ == '__main__':
     print(f'Mean CLIP loss before: {mean_before_loss}')
     mean_after_loss /= len(clip_losses)
     print(f'Mean CLIP loss after: {mean_after_loss}')
+    
+    # NEW: Calculate and display target caption similarity statistics
+    if target_similarities:
+        mean_target_similarity = sum(target_similarities) / len(target_similarities)
+        print(f'Mean target caption similarity: {mean_target_similarity:.4f}')
+        
+        # Calculate standard deviation
+        target_variance = sum([((x - mean_target_similarity) ** 2) for x in target_similarities]) / len(target_similarities)
+        target_std = target_variance ** 0.5
+        print(f'STD target caption similarity: {target_std:.4f}')
+        
+        # Calculate success rate (similarity > threshold)
+        success_threshold = 0.7  # Define success threshold
+        success_count = sum([1 for sim in target_similarities if sim > success_threshold])
+        success_rate = success_count / len(target_similarities) * 100
+        print(f'Target similarity success rate (>{success_threshold}): {success_rate:.2f}% ({success_count}/{len(target_similarities)})')
     
     before_variance = sum([((x - mean_before_loss) ** 2) for x, y in clip_losses]) / len(clip_losses)
     before_std = before_variance ** 0.5
