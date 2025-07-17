@@ -21,24 +21,17 @@ from utils import save_img_and_text
 device = 'cuda' if torch.cuda.is_available else 'cpu'
 
 def smart_noise_initialization(x_source, x_target, encoder, init_method='gradient_based', eps=0.1):
-    """
-    Smart initialization for adversarial noise
-    
-    Args:
-        x_source: Source image tensor
-        x_target: Target image tensor
-        encoder: Image encoder model
-        init_method: Initialization method ('gradient_based', 'random_normal', 'frequency_based', 'adversarial_direction')
-        eps: Epsilon value for perturbation magnitude
-    
-    Returns:
-        noise: Initialized noise tensor with gradients enabled
-    """
+    """Smart initialization for adversarial noise"""
     if init_method == 'gradient_based':
         # Use gradient of target similarity as initialization
         x_source_copy = x_source.clone().requires_grad_(True)
-        x_target_emb = encoder(x_target.unsqueeze(0))[1]
-        x_source_emb = encoder(x_source_copy.unsqueeze(0))[1]
+        
+        # FIX: Ensure proper batch dimension for encoder
+        x_target_batch = x_target.unsqueeze(0) if x_target.dim() == 3 else x_target
+        x_source_batch = x_source_copy.unsqueeze(0) if x_source_copy.dim() == 3 else x_source_copy
+        
+        x_target_emb = encoder(x_target_batch)[1]
+        x_source_emb = encoder(x_source_batch)[1]
         
         # Compute gradient pointing towards target
         similarity = F.cosine_similarity(x_source_emb, x_target_emb).mean()
@@ -46,36 +39,19 @@ def smart_noise_initialization(x_source, x_target, encoder, init_method='gradien
         
         # Use gradient direction for initialization
         noise = x_source_copy.grad.sign() * eps * 0.1
+        
+        # FIX: Ensure noise has batch dimension like original
+        if noise.dim() == 3:
+            noise = noise.unsqueeze(0)
+            
         return noise.detach().requires_grad_(True)
         
-    elif init_method == 'random_normal':
-        # Small random noise
-        noise = torch.randn_like(x_source) * eps * 0.1
-        return noise.requires_grad_(True)
-        
-    elif init_method == 'frequency_based':
-        # Initialize in frequency domain (high-frequency components)
-        noise = torch.zeros_like(x_source)
-        # Add high-frequency noise
-        for i in range(3):  # RGB channels
-            channel_noise = torch.randn(x_source.shape[-2:]) * eps * 0.1
-            noise[i] = channel_noise
-        return noise.requires_grad_(True)
-        
-    elif init_method == 'adversarial_direction':
-        # Use FGSM-like initialization
-        x_source_copy = x_source.clone().requires_grad_(True)
-        x_target_emb = encoder(x_target.unsqueeze(0))[1]
-        x_source_emb = encoder(x_source_copy.unsqueeze(0))[1]
-        
-        loss = 1 - F.cosine_similarity(x_source_emb, x_target_emb).mean()
-        loss.backward()
-        
-        noise = eps * 0.1 * x_source_copy.grad.sign()
-        return noise.detach().requires_grad_(True)
-        
-    else:  # fallback to zeros
-        return torch.zeros_like(x_source, requires_grad=True)
+    else:  # fallback to zeros with proper shape
+        # FIX: Match original implementation shape
+        if x_source.dim() == 3:
+            return torch.zeros_like(x_source.unsqueeze(0), requires_grad=True)
+        else:
+            return torch.zeros_like(x_source, requires_grad=True)
 
 def uap_sgd(model, model_name, encoder, tokenizer, image_processor, image_mean, image_std, clip_model, loader, nb_epoch, eps, c=0.1, targeted=False, lr=0.01, nb_imgs=1000, clip_weight=0.5):
     '''
@@ -147,13 +123,17 @@ def uap_sgd(model, model_name, encoder, tokenizer, image_processor, image_mean, 
         if imgs_counter == nb_imgs:
             break
         
-        # Smart noise initialization (IMPROVEMENT 1)
+        # Smart noise initialization (IMPROVEMENT 1) - FIX
         noise = smart_noise_initialization(
             x[1], x[0], encoder, 
             init_method='gradient_based', 
             eps=eps
         ).to(device)
         
+        # FIX: Ensure noise shape matches original approach
+        if noise.dim() == 3:
+            noise = noise.unsqueeze(0)
+    
         # Improved optimizer and scheduler (IMPROVEMENT 2)
         optimizer = AdamW([noise], lr=lr, weight_decay=1e-4, betas=(0.9, 0.999))
         scheduler = CosineAnnealingLR(optimizer, T_max=nb_epoch, eta_min=lr*0.01)
@@ -176,9 +156,6 @@ def uap_sgd(model, model_name, encoder, tokenizer, image_processor, image_mean, 
             optimizer.zero_grad()
             # Add the noise to the input
             x_adv = (x[1] + noise).cuda()
-          
-            if x_adv.dim() == 3:
-                x_adv = x_adv.unsqueeze(0)
                 
             # Embed the perturbed image
             x_adv_emb = encoder(x_adv)[1]
@@ -194,7 +171,10 @@ def uap_sgd(model, model_name, encoder, tokenizer, image_processor, image_mean, 
                 target_text_emb = clip_model.encode_text(target_tokenized)
             
             adv_text_emb = clip_model.encode_text(adv_tokenized)
-            adv_img_emb = clip_model.encode_image(F2.resize(x_adv, (224, 224), antialias=True))
+            
+            # FIX: Resize with proper batch handling
+            x_adv_resized = F2.resize(x_adv, (224, 224), antialias=True)
+            adv_img_emb = clip_model.encode_image(x_adv_resized)
             
             # Loss components
             # 1. Original embedding similarity loss

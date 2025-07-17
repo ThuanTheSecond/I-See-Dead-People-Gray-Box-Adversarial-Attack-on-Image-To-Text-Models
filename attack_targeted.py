@@ -98,7 +98,6 @@ def uap_sgd(model, model_name, encoder, tokenizer, image_processor, image_mean, 
             # Add the noise to the input
             # x_adv = torch.clamp((x[1] + noise).cuda(), -1, 1)
             x_adv = (x[1] + noise).cuda()
-            
             # Embed the perturbed image
             x_adv_emb = encoder(x_adv)[1]
             # L2 distance
