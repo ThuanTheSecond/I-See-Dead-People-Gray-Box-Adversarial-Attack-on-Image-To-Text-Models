@@ -78,9 +78,13 @@ def uap_sgd(model, model_name, encoder, tokenizer, image_processor, image_mean, 
         # Define the scheduler
         scheduler = ReduceLROnPlateau(optimizer=optimizer, patience=30, factor=0.1, cooldown=30)
         
-        # Save the original target image embedding
+        # Save the original target image embedding - handle different encoder outputs
         with torch.no_grad():
-            x_emb = encoder(x)[1][0].detach()
+            encoder_output = encoder(x)
+            if isinstance(encoder_output, tuple):
+                x_emb = encoder_output[1][0].detach()  # vit-gpt2 style
+            else:
+                x_emb = encoder_output.last_hidden_state[0].detach()  # blip/blip2 style
             
         save_img_and_text(F2.resize(x[0], (224, 224)), model_orig_pred[0], image_mean, image_std, eps, i, target_img=True, targeted=True, adv=False)
         save_img_and_text(F2.resize(x[1], (224, 224)), model_orig_pred[1], image_mean, image_std, eps, i, target_img=False, targeted=True, adv=False)
@@ -98,8 +102,13 @@ def uap_sgd(model, model_name, encoder, tokenizer, image_processor, image_mean, 
             # Add the noise to the input
             # x_adv = torch.clamp((x[1] + noise).cuda(), -1, 1)
             x_adv = (x[1] + noise).cuda()
-            # Embed the perturbed image
-            x_adv_emb = encoder(x_adv)[1]
+            # Embed the perturbed image - handle different encoder outputs
+            encoder_output_adv = encoder(x_adv)
+            if isinstance(encoder_output_adv, tuple):
+                x_adv_emb = encoder_output_adv[1]  # vit-gpt2 style
+            else:
+                x_adv_emb = encoder_output_adv.last_hidden_state  # blip/blip2 style
+            
             # L2 distance
             l2_dist = torch.norm((noise).view(len(noise), -1), p=2, dim=1)
 
@@ -122,12 +131,14 @@ def uap_sgd(model, model_name, encoder, tokenizer, image_processor, image_mean, 
             cur_losses.append(loss.data.item())
             
             if epoch % 100 == 99:
-                print(f'Epoch #{epoch+1} loss: {loss.data[0]:.4f}')
+                print(f'Epoch #{epoch+1} loss: {loss.item():.4f}')
             
         adv_pred = predict(model_name, model, tokenizer, image_processor, x_adv)
+        if isinstance(adv_pred, list):
+            adv_pred = adv_pred[0]
         print(f'After attack:\n\t{adv_pred}')
         
-        adv_tokenized = clip.tokenize(adv_pred).cuda()
+        adv_tokenized = clip.tokenize([adv_pred]).cuda()
         with torch.no_grad():
             y_adv_emb = clip_model.encode_text(adv_tokenized) 
             x_adv_emb = clip_model.encode_image(F2.resize(x_adv, (224, 224), antialias=True))
