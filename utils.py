@@ -56,6 +56,19 @@ def load_model(model_name):
             model = BlipForConditionalGeneration.from_pretrained(loc).eval().cuda()
             tokenizer = None
             encoder = model.vision_model
+        case 'blip2':
+            from transformers import Blip2Processor, Blip2ForConditionalGeneration
+            loc = "Salesforce/blip2-opt-2.7b"  
+            # Load processor và model
+            processor = Blip2Processor.from_pretrained(loc)
+            model = Blip2ForConditionalGeneration.from_pretrained(loc).eval().cuda()
+            # Lấy mean và std từ processor
+            mean = processor.image_processor.image_mean
+            std = processor.image_processor.image_std
+            # BLIP2 không sử dụng tokenizer riêng
+            tokenizer = None
+            # Trích xuất encoder từ model
+            encoder = model.vision_model
         case _:
             raise Exception('No such model {model_name}')
     return processor, tokenizer, model, encoder, mean, std
@@ -99,10 +112,6 @@ def save_img_and_text(img, text, image_mean, image_std, eps, i, target_img=False
         f.close()
     
 def predict(model_name, model, tokenizer, feature_extractor, image):
-    
-    # pixel_values = feature_extractor(images=image, return_tensors="pt").pixel_values
-    # pixel_values = pixel_values.cuda()
-    
     match model_name:
         case 'vit-gpt2':
             with torch.no_grad():
@@ -120,8 +129,44 @@ def predict(model_name, model, tokenizer, feature_extractor, image):
                 else:
                     output_ids1 = model.generate(image[0].unsqueeze(0), max_length=16, num_beams=4, return_dict_in_generate=True).sequences
                     preds = feature_extractor.tokenizer.decode(output_ids1[0], skip_special_tokens=True)
+        case 'blip2':
+            with torch.no_grad():
+                # Xử lý input dựa trên shape của image
+                if image.shape[0] == 2:
+                    # Xử lý từng image riêng biệt
+                    inputs1 = feature_extractor(images=image[0], return_tensors="pt").to("cuda")
+                    inputs2 = feature_extractor(images=image[1], return_tensors="pt").to("cuda")
+                    
+                    generated_ids1 = model.generate(
+                        pixel_values=inputs1.pixel_values,
+                        max_length=30,
+                        num_beams=5,
+                        early_stopping=True
+                    )
+                    generated_ids2 = model.generate(
+                        pixel_values=inputs2.pixel_values,
+                        max_length=30,
+                        num_beams=5,
+                        early_stopping=True
+                    )
+                    
+                    preds1 = feature_extractor.tokenizer.decode(generated_ids1[0], skip_special_tokens=True)
+                    preds2 = feature_extractor.tokenizer.decode(generated_ids2[0], skip_special_tokens=True)
+                    preds = [preds1, preds2]
+                else:
+                    inputs = feature_extractor(images=image[0], return_tensors="pt").to("cuda")
+                    generated_ids = model.generate(
+                        pixel_values=inputs.pixel_values,
+                        max_length=30,
+                        num_beams=5,
+                        early_stopping=True
+                    )
+                    preds = feature_extractor.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+                
+        case _:
+            raise Exception(f'No such model {model_name}')
     return preds
-
+    
 def make_df(labels):
     dataframe = pd.read_csv(labels)
     train_dataframe = dataframe
