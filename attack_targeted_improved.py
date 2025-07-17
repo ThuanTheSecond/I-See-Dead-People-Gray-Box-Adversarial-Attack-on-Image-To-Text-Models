@@ -246,7 +246,7 @@ def uap_sgd(model, model_name, encoder, tokenizer, image_processor, image_mean, 
         save_img_and_text(F2.resize(x_adv[0], (224, 224)), adv_pred, image_mean, image_std, eps, i, target_img=False, targeted=True, adv=True)
         total_losses.append(cur_losses)
         clip_losses.append((clip_score_before, clip_score_after))
-        print(f'Total current losses: {len(cur_losses)} losses recorded')
+        #print(f'Total current losses: {len(cur_losses)} losses recorded')
         print(f'Final loss: {cur_losses[-1]:.4f}')
         print(f'CLIP loss before and after: {clip_score_before.item():.4f}, {clip_score_after.item():.4f}')
         
