@@ -15,7 +15,7 @@ from dataset import Flickr30k
 
 ######## Change this to your own paths ########
 #FLICKR_PATH = "/cs_storage/public_datasets/flickr30k-labels/results_new.csv"
-FLICKR_PATH = "/kaggle/working/I-See-Dead-People-Gray-Box-Adversarial-Attack-on-Image-To-Text-Models/flickr30k/Images/results.csv"
+FLICKR_PATH = "/kaggle/input/flickr30k/Images/results.csv"
 
 def load_dataset(dataset, image_processsor, batch_size=6):
     match dataset:

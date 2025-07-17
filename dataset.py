@@ -55,7 +55,7 @@ class Flickr30k(Dataset):
 
     def __getitem__(self, idx):
         item = {}
-        image = Image.open(f"/kaggle/working/I-See-Dead-People-Gray-Box-Adversarial-Attack-on-Image-To-Text-Models/flickr30k/Images/{self.image_filenames[idx]}").convert("RGB")
+        image = Image.open(f"/kaggle/input/flickr30k/Images/{self.image_filenames[idx]}").convert("RGB")
         if self.transform:
             image = self.transform(images=image, return_tensors="pt").pixel_values.squeeze(0)
         item['image'] = image.float()
