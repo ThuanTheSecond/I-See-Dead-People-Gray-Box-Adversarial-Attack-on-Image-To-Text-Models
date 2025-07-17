@@ -138,10 +138,11 @@ def uap_sgd(model, model_name, encoder, tokenizer, image_processor, image_mean, 
         optimizer = AdamW([noise], lr=lr, weight_decay=1e-4, betas=(0.9, 0.999))
         scheduler = CosineAnnealingLR(optimizer, T_max=nb_epoch, eta_min=lr*0.01)
         
-        # Save the original target image embedding
+        # PRE-COMPUTE embeddings (GPU optimization)
         with torch.no_grad():
             x_emb = encoder(x)[1][0].detach()
-            
+            x_base = x[1].cuda()  # Keep on GPU
+        
         save_img_and_text(F2.resize(x[0], (224, 224)), model_orig_pred[0], image_mean, image_std, eps, i, target_img=True, targeted=True, adv=False)
         save_img_and_text(F2.resize(x[1], (224, 224)), model_orig_pred[1], image_mean, image_std, eps, i, target_img=False, targeted=True, adv=False)
         print(f'Cos sim: {cos_sim.mean().item():.4f}')
@@ -151,32 +152,40 @@ def uap_sgd(model, model_name, encoder, tokenizer, image_processor, image_mean, 
         
         cur_losses = []
         
+        # BATCH ACCUMULATION for GPU efficiency
+        loss_accumulation = []
+        print_interval = 100
+        
         for epoch in range(nb_epoch):
             # Zero out the gradients
             optimizer.zero_grad()
             # Add the noise to the input
-            x_adv = (x[1] + noise).cuda()
+            x_adv = x_base + noise.squeeze(0) if noise.dim() == 4 else noise
                 
+            # Ensure batch dimension for encoder
+            if x_adv.dim() == 3:
+                x_adv = x_adv.unsqueeze(0)
+            
             # Embed the perturbed image
             x_adv_emb = encoder(x_adv)[1]
             
-            # Generate prediction for adversarial image
-            adv_pred = predict(model_name, model, tokenizer, image_processor, x_adv)
+            # OPTIMIZATION: Minimize CPU-GPU transfers
+            # Only generate prediction when needed (not every epoch)
+            if epoch % 50 == 0 or epoch == nb_epoch - 1:
+                adv_pred = predict(model_name, model, tokenizer, image_processor, x_adv)
+                adv_tokenized = clip.tokenize(adv_pred).cuda()
+                adv_text_emb = clip_model.encode_text(adv_tokenized)
             
-            # CLIP-based multi-component loss (IMPROVEMENT 3)
-            adv_tokenized = clip.tokenize(adv_pred).cuda()
-            target_tokenized = clip.tokenize([y[0]]).cuda()  # Target caption
+            # OPTIMIZATION: Pre-compute resized tensor
+            if epoch == 0:
+                x_adv_size = F2.resize(x_adv, (224, 224), antialias=True)
+            else:
+                # Update only the noise part
+                x_adv_size = F2.resize(x_adv, (224, 224), antialias=True)
             
-            with torch.no_grad():
-                target_text_emb = clip_model.encode_text(target_tokenized)
+            adv_img_emb = clip_model.encode_image(x_adv_size)
             
-            adv_text_emb = clip_model.encode_text(adv_tokenized)
-            
-            # FIX: Resize with proper batch handling
-            x_adv_resized = F2.resize(x_adv, (224, 224), antialias=True)
-            adv_img_emb = clip_model.encode_image(x_adv_resized)
-            
-            # Loss components
+            # Loss components (All GPU operations)
             # 1. Original embedding similarity loss
             if not targeted:
                 embedding_loss = nn.CosineSimilarity()(x_adv_emb, x_emb).mean()
@@ -187,15 +196,34 @@ def uap_sgd(model, model_name, encoder, tokenizer, image_processor, image_mean, 
             clip_img_text_loss = 1 - F.cosine_similarity(adv_img_emb, adv_text_emb).mean()
             
             # 3. Target similarity loss (for targeted attack)
-            target_similarity_loss = 1 - F.cosine_similarity(adv_text_emb, target_text_emb).mean()
+            temperature = max(0.1, 1.0 - epoch / nb_epoch)  # Cool down over time
+            target_similarity_loss = 1 - F.cosine_similarity(adv_text_emb, target_text_emb).mean() / temperature
             
             # 4. L2 regularization
-            l2_dist = torch.norm((noise).view(len(noise), -1), p=2, dim=1)
+            l2_dist = torch.norm(noise.view(noise.shape[0], -1), p=2, dim=1)
+            
+            # RECOMMENDATION 1: Dynamic clip_weight scheduling
+            def get_clip_weight(epoch, total_epochs, initial_weight=0.3, final_weight=0.8):
+                """Increase CLIP weight over time for better target focusing"""
+                progress = epoch / total_epochs
+                return initial_weight + (final_weight - initial_weight) * progress
+            
+            # RECOMMENDATION 2: Adaptive clip weight
+            current_clip_weight = get_clip_weight(epoch, nb_epoch, 0.3, 0.8)
+            
+            # RECOMMENDATION 3: Temperature scaling for better target focus
+            temperature = max(0.1, 1.0 - epoch / nb_epoch)  # Cool down over time
+            target_similarity_loss = 1 - F.cosine_similarity(adv_text_emb, target_text_emb).mean() / temperature
+            
+            # RECOMMENDATION 4: Weighted loss with penalty for poor alignment
+            alignment_penalty = torch.clamp(clip_img_text_loss - 0.3, min=0) * 2.0  # Penalty if > 0.3
             
             # Combined loss with CLIP components
-            loss = embedding_loss + clip_weight * (clip_img_text_loss + target_similarity_loss) + c * l2_dist
-                    
-            # Improved training step
+            loss = embedding_loss + current_clip_weight * (clip_img_text_loss + target_similarity_loss) + c * l2_dist + alignment_penalty
+            
+            # OPTIMIZATION: Accumulate losses on GPU
+            loss_accumulation.append(loss.detach())
+            
             loss.backward()
             # Gradient clipping for stability
             torch.nn.utils.clip_grad_norm_([noise], max_norm=1.0)
@@ -205,27 +233,31 @@ def uap_sgd(model, model_name, encoder, tokenizer, image_processor, image_mean, 
             scheduler.step()
             # Project to epsilon ball
             noise.data.clamp_(-eps, eps)
-            # Save loss
-            cur_losses.append(loss.data.item())
             
-            if epoch % 100 == 99:
-                print(f'Epoch #{epoch+1} loss: {loss.data.item():.4f}')
-                # Print loss components for debugging
+            # OPTIMIZATION: Reduce CPU transfers for logging
+            if epoch % print_interval == print_interval - 1:
+                # Transfer to CPU only when printing
+                avg_loss = torch.stack(loss_accumulation).mean().item()
+                cur_losses.extend([l.item() for l in loss_accumulation])
+                loss_accumulation = []  # Reset
+                
+                print(f'Epoch #{epoch+1} avg loss: {avg_loss:.4f}')
                 print(f'  Embedding loss: {embedding_loss.item():.4f}')
                 print(f'  CLIP img-text loss: {clip_img_text_loss.item():.4f}')
                 print(f'  Target similarity loss: {target_similarity_loss.item():.4f}')
                 print(f'  L2 distance: {l2_dist.mean().item():.4f}')
                 print(f'  Learning rate: {scheduler.get_last_lr()[0]:.6f}')
-            
-        adv_pred = predict(model_name, model, tokenizer, image_processor, x_adv)
-        print(f'After attack:\n\t{adv_pred}')
         
-        adv_tokenized = clip.tokenize(adv_pred).cuda()
+        # Final evaluation
         with torch.no_grad():
-            y_adv_emb = clip_model.encode_text(adv_tokenized) 
+            adv_pred = predict(model_name, model, tokenizer, image_processor, x_adv)
+            adv_tokenized = clip.tokenize(adv_pred).cuda()
+            y_adv_emb = clip_model.encode_text(adv_tokenized)
             x_adv_emb_clip = clip_model.encode_image(F2.resize(x_adv, (224, 224), antialias=True))
+            
+            clip_score_after = F.cosine_similarity(x_adv_emb_clip, y_adv_emb).mean()
+            target_similarity_final = F.cosine_similarity(y_adv_emb, target_text_emb).mean()
         
-        clip_score_after = F.cosine_similarity(x_adv_emb_clip, y_adv_emb).mean()
         x_adv_for_save = x_adv.squeeze(0) if x_adv.dim() == 4 else x_adv
         save_img_and_text(F2.resize(x_adv_for_save, (224, 224)), adv_pred, image_mean, image_std, eps, i, target_img=False, targeted=True, adv=True)
         # save_img_and_text(F2.resize(x_adv[0], (224, 224)), adv_pred, image_mean, image_std, eps, i, target_img=False, targeted=True, adv=True)
@@ -239,6 +271,7 @@ def uap_sgd(model, model_name, encoder, tokenizer, image_processor, image_mean, 
         target_similarity_final = F.cosine_similarity(y_adv_emb, target_text_emb).mean()
         print(f'Target caption similarity: {target_similarity_final.item():.4f}')
         
+        # OPTIMIZATION: Clear GPU cache
         torch.cuda.empty_cache()
         
     return total_losses, clip_losses
