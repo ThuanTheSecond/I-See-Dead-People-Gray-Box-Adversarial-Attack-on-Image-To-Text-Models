@@ -176,6 +176,10 @@ def uap_sgd(model, model_name, encoder, tokenizer, image_processor, image_mean, 
             optimizer.zero_grad()
             # Add the noise to the input
             x_adv = (x[1] + noise).cuda()
+          
+            if x_adv.dim() == 3:
+                x_adv = x_adv.unsqueeze(0)
+                
             # Embed the perturbed image
             x_adv_emb = encoder(x_adv)[1]
             
@@ -242,8 +246,9 @@ def uap_sgd(model, model_name, encoder, tokenizer, image_processor, image_mean, 
             x_adv_emb_clip = clip_model.encode_image(F2.resize(x_adv, (224, 224), antialias=True))
         
         clip_score_after = F.cosine_similarity(x_adv_emb_clip, y_adv_emb).mean()
-        
-        save_img_and_text(F2.resize(x_adv[0], (224, 224)), adv_pred, image_mean, image_std, eps, i, target_img=False, targeted=True, adv=True)
+        x_adv_for_save = x_adv.squeeze(0) if x_adv.dim() == 4 else x_adv
+        save_img_and_text(F2.resize(x_adv_for_save, (224, 224)), adv_pred, image_mean, image_std, eps, i, target_img=False, targeted=True, adv=True)
+        # save_img_and_text(F2.resize(x_adv[0], (224, 224)), adv_pred, image_mean, image_std, eps, i, target_img=False, targeted=True, adv=True)
         total_losses.append(cur_losses)
         clip_losses.append((clip_score_before, clip_score_after))
         #print(f'Total current losses: {len(cur_losses)} losses recorded')

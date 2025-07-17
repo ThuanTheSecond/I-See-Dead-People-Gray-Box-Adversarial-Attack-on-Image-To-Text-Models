@@ -98,6 +98,7 @@ def uap_sgd(model, model_name, encoder, tokenizer, image_processor, image_mean, 
             # Add the noise to the input
             # x_adv = torch.clamp((x[1] + noise).cuda(), -1, 1)
             x_adv = (x[1] + noise).cuda()
+            
             # Embed the perturbed image
             x_adv_emb = encoder(x_adv)[1]
             # L2 distance
@@ -158,6 +159,13 @@ if __name__ == '__main__':
     eps         = args.eps
     nb_epoch    = args.n_epochs
     n_imgs      = args.n_imgs
+    
+    print(f"Starting targeted attack with:")
+    print(f"  Model: {model_name}")
+    print(f"  Dataset: {dataset}")
+    print(f"  Epsilon: {eps}")
+    print(f"  Epochs: {nb_epoch}")
+    print(f"  Images: {n_imgs}")
 
     clip_model, clip_preprocessor = clip.load("ViT-B/32", device='cuda')
     image_processor, tokenizer, model, encoder, image_mean, image_std = load_model(model_name=model_name)
