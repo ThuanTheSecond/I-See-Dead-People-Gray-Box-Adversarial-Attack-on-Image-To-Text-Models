@@ -55,7 +55,7 @@ def smart_noise_initialization(x_source, x_target, encoder, init_method='gradien
 
 def uap_sgd(model, model_name, encoder, tokenizer, image_processor, image_mean, image_std, clip_model, loader, nb_epoch, eps, c=0.1, targeted=False, lr=0.01, nb_imgs=1000, clip_weight=0.5):
     '''
-    Universal Adversarial Perturbation using Stochastic Gradient Descent with improvements
+    Universal Adversarial Perturbation using Stochastic Gradient Descent with GPU optimizations.
     
     INPUT
     model           Vision-Language model
@@ -138,10 +138,16 @@ def uap_sgd(model, model_name, encoder, tokenizer, image_processor, image_mean, 
         optimizer = AdamW([noise], lr=lr, weight_decay=1e-4, betas=(0.9, 0.999))
         scheduler = CosineAnnealingLR(optimizer, T_max=nb_epoch, eta_min=lr*0.01)
         
-        # Save the original target image embedding
+        # --- GPU OPTIMIZATION 1: Pre-compute constant embeddings on GPU ---
         with torch.no_grad():
+            # Base image for attack, kept on GPU
+            x_base = x[1].cuda() 
+            # Original target image embedding
             x_emb = encoder(x)[1][0].detach()
-            
+            # Target caption embedding, computed once
+            target_tokenized = clip.tokenize([y[0]]).cuda()
+            target_text_emb = clip_model.encode_text(target_tokenized)
+
         save_img_and_text(F2.resize(x[0], (224, 224)), model_orig_pred[0], image_mean, image_std, eps, i, target_img=True, targeted=True, adv=False)
         save_img_and_text(F2.resize(x[1], (224, 224)), model_orig_pred[1], image_mean, image_std, eps, i, target_img=False, targeted=True, adv=False)
         print(f'Cos sim: {cos_sim.mean().item():.4f}')
@@ -151,79 +157,72 @@ def uap_sgd(model, model_name, encoder, tokenizer, image_processor, image_mean, 
         
         cur_losses = []
         
-        # FIX: Pre-compute target text embedding ONCE before the loop
-        with torch.no_grad():
-            target_tokenized = clip.tokenize([y[0]]).cuda()
-            target_text_emb = clip_model.encode_text(target_tokenized)
+        # --- GPU OPTIMIZATION 2: Batch logging ---
+        loss_accumulation_gpu = [] # Accumulate loss tensors on GPU
+        print_interval = 100
+        
+        # Initialize adversarial text embedding
+        adv_text_emb = None
 
         for epoch in range(nb_epoch):
-            # Zero out the gradients
             optimizer.zero_grad()
-            # Add the noise to the input
-            x_adv = (x[1] + noise).cuda()
-                
-            # Embed the perturbed image
+            
+            # All operations are now on GPU, no redundant .cuda()
+            x_adv = x_base + noise.squeeze(0)
+            
+            # Ensure batch dimension for encoder
+            if x_adv.dim() == 3:
+                x_adv = x_adv.unsqueeze(0)
+            
             x_adv_emb = encoder(x_adv)[1]
             
-            # Generate prediction for adversarial image
-            adv_pred = predict(model_name, model, tokenizer, image_processor, x_adv)
+            # --- GPU OPTIMIZATION 3: Reduced prediction frequency ---
+            # Only generate new caption and its embedding periodically
+            if epoch % 50 == 0 or epoch == 0 or adv_text_emb is None:
+                with torch.no_grad(): # No need for gradients here
+                    adv_pred = predict(model_name, model, tokenizer, image_processor, x_adv)
+                adv_tokenized = clip.tokenize(adv_pred).cuda()
+                adv_text_emb = clip_model.encode_text(adv_tokenized)
             
-            # CLIP-based multi-component loss (IMPROVEMENT 3)
-            adv_tokenized = clip.tokenize(adv_pred).cuda()
+            # CLIP image embedding (this is fast and needs to be current)
+            adv_img_emb = clip_model.encode_image(F2.resize(x_adv, (224, 224), antialias=True))
             
-            with torch.no_grad():
-                target_text_emb = clip_model.encode_text(target_tokenized)
-            
-            adv_text_emb = clip_model.encode_text(adv_tokenized)
-            
-            # FIX: Resize with proper batch handling
-            x_adv_resized = F2.resize(x_adv, (224, 224), antialias=True)
-            adv_img_emb = clip_model.encode_image(x_adv_resized)
-            
-            # Loss components
-            # 1. Original embedding similarity loss
+            # --- Loss components (all on GPU) ---
             if not targeted:
                 embedding_loss = nn.CosineSimilarity()(x_adv_emb, x_emb).mean()
             else:
                 embedding_loss = 1 - nn.CosineSimilarity()(x_adv_emb, x_emb).mean()
             
-            # 2. CLIP semantic consistency loss
             clip_img_text_loss = 1 - F.cosine_similarity(adv_img_emb, adv_text_emb).mean()
-            
-            # 3. Target similarity loss (for targeted attack)
             target_similarity_loss = 1 - F.cosine_similarity(adv_text_emb, target_text_emb).mean()
+            l2_dist = torch.norm(noise.view(noise.shape[0], -1), p=2, dim=1)
             
-            # 4. L2 regularization
-            l2_dist = torch.norm((noise).view(len(noise), -1), p=2, dim=1)
-            
-            # Combined loss with CLIP components
             loss = embedding_loss + clip_weight * (clip_img_text_loss + target_similarity_loss) + c * l2_dist
-                    
-            # Improved training step
-            loss.backward()
-            # Gradient clipping for stability
-            torch.nn.utils.clip_grad_norm_([noise], max_norm=1.0)
-            # Step according to gradient
-            optimizer.step()
-            # Scheduler step (after optimizer step for cosine annealing)
-            scheduler.step()
-            # Project to epsilon ball
-            noise.data.clamp_(-eps, eps)
-            # Save loss
-            cur_losses.append(loss.data.item())
             
-            if epoch % 100 == 99:
-                print(f'Epoch #{epoch+1} loss: {loss.data.item():.4f}')
-                # Print loss components for debugging
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_([noise], max_norm=1.0)
+            optimizer.step()
+            scheduler.step()
+            noise.data.clamp_(-eps, eps)
+            
+            # Accumulate loss on GPU, avoid .item()
+            loss_accumulation_gpu.append(loss.detach())
+            
+            # Log periodically to reduce GPU-CPU sync
+            if (epoch + 1) % print_interval == 0:
+                # Transfer to CPU only when printing
+                avg_loss = torch.stack(loss_accumulation_gpu).mean().item()
+                cur_losses.extend([l.item() for l in loss_accumulation_gpu])
+                loss_accumulation_gpu = [] # Reset accumulator
+                
+                print(f'Epoch #{epoch+1} avg loss: {avg_loss:.4f}')
                 print(f'  Embedding loss: {embedding_loss.item():.4f}')
                 print(f'  CLIP img-text loss: {clip_img_text_loss.item():.4f}')
                 print(f'  Target similarity loss: {target_similarity_loss.item():.4f}')
                 print(f'  L2 distance: {l2_dist.mean().item():.4f}')
                 print(f'  Learning rate: {scheduler.get_last_lr()[0]:.6f}')
-            
-        # --- Start of the reviewed section (with improvements) ---
         
-        # Final prediction after attack
+        # --- Final prediction after attack
         adv_pred = predict(model_name, model, tokenizer, image_processor, x_adv)
         print(f'After attack:\n\t{adv_pred}')
         
