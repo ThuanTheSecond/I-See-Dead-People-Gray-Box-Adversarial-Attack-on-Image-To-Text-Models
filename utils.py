@@ -57,14 +57,6 @@ def load_model(model_name):
             model = BlipForConditionalGeneration.from_pretrained(loc).eval().cuda()
             tokenizer = None
             encoder = model.vision_model
-        case 'blip2':
-            loc = "Salesforce/blip2-opt-2.7b"
-            processor = Blip2Processor.from_pretrained(loc)
-            mean = processor.image_processor.image_mean
-            std = processor.image_processor.image_std
-            model = Blip2ForConditionalGeneration.from_pretrained(loc).eval().cuda()
-            tokenizer = None
-            encoder = model.vision_model
         case _:
             raise Exception('No such model {model_name}')
     return processor, tokenizer, model, encoder, mean, std
@@ -129,17 +121,6 @@ def predict(model_name, model, tokenizer, feature_extractor, image):
                 else:
                     output_ids1 = model.generate(image[0].unsqueeze(0), max_length=16, num_beams=4, return_dict_in_generate=True).sequences
                     preds = feature_extractor.tokenizer.decode(output_ids1[0], skip_special_tokens=True)
-        case 'blip2':
-            with torch.no_grad():
-                if image.shape[0] == 2:
-                    output_ids1 = model.generate(pixel_values=image[0].unsqueeze(0), max_length=20, num_beams=4)
-                    output_ids2 = model.generate(pixel_values=image[1].unsqueeze(0), max_length=20, num_beams=4)
-                    preds1 = feature_extractor.processor.decode(output_ids1[0], skip_special_tokens=True)
-                    preds2 = feature_extractor.processor.decode(output_ids2[0], skip_special_tokens=True)
-                    preds = [preds1, preds2]
-                else:
-                    output_ids = model.generate(pixel_values=image[0].unsqueeze(0), max_length=20, num_beams=4)
-                    preds = feature_extractor.processor.decode(output_ids[0], skip_special_tokens=True)
     return preds
 
 def make_df(labels):
