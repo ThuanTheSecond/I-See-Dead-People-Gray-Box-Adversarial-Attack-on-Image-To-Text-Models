@@ -151,7 +151,8 @@ if __name__ == '__main__':
     n_imgs   = args.n_imgs
 
     clip_model, clip_preprocessor = clip.load("ViT-B/32", device='cuda')
-    image_processor, tokenizer, model = load_model(model_name=model)
+    #image_processor, tokenizer, model = load_model(model_name=model)
+    image_processor, tokenizer, model, encoder, mean, std = load_model(model_name=model)
     dataloader = load_dataset(dataset, image_processor)
     
     total_losses, clip_losses = uap_sgd(model=model, tokenizer=tokenizer, image_processor=image_processor, clip_model=clip_model, clip_preprocessor=clip_preprocessor, loader=dataloader, nb_epoch=nb_epoch, eps=eps, c = 0.1, targeted=False, lr=0.01, nb_imgs=n_imgs)
