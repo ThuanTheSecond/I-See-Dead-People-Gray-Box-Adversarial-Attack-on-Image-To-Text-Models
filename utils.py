@@ -56,8 +56,18 @@ def load_model(model_name):
             model = BlipForConditionalGeneration.from_pretrained(loc).eval().cuda()
             tokenizer = None
             encoder = model.vision_model
+        case 'git-base':
+            from transformers import GitProcessor, GitForCausalLM
+            
+            loc = "microsoft/git-base"
+            processor = GitProcessor.from_pretrained(loc)
+            mean = processor.image_processor.image_mean
+            std = processor.image_processor.image_std
+            model = GitForCausalLM.from_pretrained(loc).eval().cuda()
+            tokenizer = processor.tokenizer
+            encoder = model.git.image_encoder
         case _:
-            raise Exception('No such model {model_name}')
+            raise Exception(f'No such model {model_name}')
     return processor, tokenizer, model, encoder, mean, std
     
 
@@ -99,17 +109,15 @@ def save_img_and_text(img, text, image_mean, image_std, eps, i, target_img=False
         f.close()
     
 def predict(model_name, model, tokenizer, feature_extractor, image):
-    
-    # pixel_values = feature_extractor(images=image, return_tensors="pt").pixel_values
-    # pixel_values = pixel_values.cuda()
-    
     match model_name:
         case 'vit-gpt2':
+            # Existing code for vit-gpt2
             with torch.no_grad():
                 output_ids = model.generate(image, max_length=16, num_beams=4, return_dict_in_generate=True).sequences
             preds = tokenizer.batch_decode(output_ids, skip_special_tokens=True)
             preds = [pred.strip() for pred in preds]
         case 'blip':
+            # Existing code for blip
             with torch.no_grad():
                 if image.shape[0] == 2:
                     output_ids1 = model.generate(image[0].unsqueeze(0), max_length=16, num_beams=4, return_dict_in_generate=True).sequences
@@ -120,6 +128,25 @@ def predict(model_name, model, tokenizer, feature_extractor, image):
                 else:
                     output_ids1 = model.generate(image[0].unsqueeze(0), max_length=16, num_beams=4, return_dict_in_generate=True).sequences
                     preds = feature_extractor.tokenizer.decode(output_ids1[0], skip_special_tokens=True)
+        case 'git-base':
+            with torch.no_grad():
+                if image.shape[0] == 2:
+                    # Handle batch size of 2 (for targeted attack)
+                    inputs1 = feature_extractor(images=image[0].unsqueeze(0), return_tensors="pt").to(image.device)
+                    inputs2 = feature_extractor(images=image[1].unsqueeze(0), return_tensors="pt").to(image.device)
+                    
+                    output_ids1 = model.generate(pixel_values=inputs1.pixel_values, max_length=16, num_beams=4)
+                    output_ids2 = model.generate(pixel_values=inputs2.pixel_values, max_length=16, num_beams=4)
+                    
+                    preds1 = tokenizer.decode(output_ids1[0], skip_special_tokens=True)
+                    preds2 = tokenizer.decode(output_ids2[0], skip_special_tokens=True)
+                    preds = [preds1, preds2]
+                else:
+                    # Handle single image or other batch sizes
+                    inputs = feature_extractor(images=image, return_tensors="pt").to(image.device)
+                    output_ids = model.generate(pixel_values=inputs.pixel_values, max_length=16, num_beams=4)
+                    preds = tokenizer.batch_decode(output_ids, skip_special_tokens=True)
+                    preds = [pred.strip() for pred in preds]
     return preds
 
 def make_df(labels):

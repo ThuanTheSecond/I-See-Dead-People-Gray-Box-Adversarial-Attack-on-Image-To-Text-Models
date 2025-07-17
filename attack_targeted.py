@@ -16,6 +16,16 @@ from utils import save_img_and_text
 
 device = 'cuda' if torch.cuda.is_available else 'cpu'
 
+def extract_embeddings(model, encoder, model_name, x):
+    """Extract embeddings based on model type"""
+    if model_name == 'git-base':
+        # Git uses a different embedding extraction method
+        return encoder(x).pooler_output
+    else:
+        # Original code for vit-gpt2 and blip
+        return encoder(x)[1]
+
+
 def uap_sgd(model, model_name, encoder, tokenizer, image_processor, image_mean, image_std, clip_model, loader, nb_epoch, eps, c = 0.1, targeted=False, lr=0.01, nb_imgs=1000):
     '''
     INPUT
@@ -80,7 +90,7 @@ def uap_sgd(model, model_name, encoder, tokenizer, image_processor, image_mean, 
         
         # Save the original target image embedding
         with torch.no_grad():
-            x_emb = encoder(x)[1][0].detach()
+            x_emb = extract_embeddings(model, encoder, model_name, x[0].unsqueeze(0))[0].detach()
             
         save_img_and_text(F2.resize(x[0], (224, 224)), model_orig_pred[0], image_mean, image_std, eps, i, target_img=True, targeted=True, adv=False)
         save_img_and_text(F2.resize(x[1], (224, 224)), model_orig_pred[1], image_mean, image_std, eps, i, target_img=False, targeted=True, adv=False)
@@ -99,7 +109,7 @@ def uap_sgd(model, model_name, encoder, tokenizer, image_processor, image_mean, 
             # x_adv = torch.clamp((x[1] + noise).cuda(), -1, 1)
             x_adv = (x[1] + noise).cuda()
             # Embed the perturbed image
-            x_adv_emb = encoder(x_adv)[1]
+            x_adv_emb = extract_embeddings(model, encoder, model_name, x_adv)
             # L2 distance
             l2_dist = torch.norm((noise).view(len(noise), -1), p=2, dim=1)
 
@@ -146,7 +156,10 @@ def uap_sgd(model, model_name, encoder, tokenizer, image_processor, image_mean, 
 
 if __name__ == '__main__':    
     parser = argparse.ArgumentParser(description="Image-to-Text Attack")
-    parser.add_argument("--model", type=str, help="Model name (str)", default='blip')
+    parser.add_argument("--model", type=str, 
+                   choices=['vit-gpt2', 'blip', 'git-base'], 
+                   help="Model name: vit-gpt2, blip, or git-base", 
+                   default='blip')
     parser.add_argument("--dataset", type=str, help="Dataset name (str)", default='flickr30k')
     parser.add_argument("--eps", type=float, help="Epsilon value (float)", default=50/255)
     parser.add_argument("--n_epochs", type=int, help="Number of epochs (int)", default=1000)

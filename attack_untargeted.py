@@ -15,7 +15,16 @@ from utils import save_img_and_text
 
 device = 'cuda' if torch.cuda.is_available else 'cpu'
 
-def uap_sgd(model, tokenizer, image_processor, clip_model, clip_preprocessor, loader, nb_epoch, eps, c = 0.1, targeted=False, lr=0.01, nb_imgs=1000):
+def extract_embeddings(model, encoder, model_name, x):
+    """Extract embeddings based on model type"""
+    if model_name == 'git-base':
+        # Git uses a different embedding extraction method
+        return encoder(x).pooler_output
+    else:
+        # Original code for vit-gpt2 and blip
+        return encoder(x)[1]
+
+def uap_sgd(model, model_name, tokenizer, image_processor, clip_model, clip_preprocessor, loader, nb_epoch, eps, c = 0.1, targeted=False, lr=0.01, nb_imgs=1000):
     '''
     INPUT
     model       model
@@ -30,7 +39,9 @@ def uap_sgd(model, tokenizer, image_processor, clip_model, clip_preprocessor, lo
     total_losses = []
     clip_losses = []
     # image encoder
-    encoder = model.encoder.cuda()
+    encoder = model.encoder.cuda() if model_name == 'vit-gpt2' else (
+        model.vision_model.cuda() if model_name == 'blip' else model.git.image_encoder.cuda()
+    )
     # imgs counter
     imgs_counter = 0
     # caption counter
@@ -41,7 +52,7 @@ def uap_sgd(model, tokenizer, image_processor, clip_model, clip_preprocessor, lo
         y = batch['caption']
         
         # Forward pass of the end-to-end model
-        model_orig_pred = predict(model, tokenizer, image_processor, x)[0]
+        model_orig_pred = predict(model_name, model, tokenizer, image_processor, x)[0]
         
         if model_orig_pred in ys or len(y[0]) > 77:
             continue
@@ -82,7 +93,7 @@ def uap_sgd(model, tokenizer, image_processor, clip_model, clip_preprocessor, lo
         scheduler = ReduceLROnPlateau(optimizer=optimizer, patience=30, factor=0.1, cooldown=30)
         
         # Save the original image embedding
-        x_emb = encoder(x)[1].detach()
+        x_emb = extract_embeddings(model, encoder, model_name, x).detach()
             
         save_img_and_text(x, model_orig_pred, eps, i, adv=False)
         print(f'Cos sim: {cos_sim.item():.4f}')
@@ -97,7 +108,7 @@ def uap_sgd(model, tokenizer, image_processor, clip_model, clip_preprocessor, lo
             # Add the noise to the input
             x_adv = torch.clamp((x + noise).cuda(), -1, 1)
             # Embed the perturbed image
-            x_adv_emb = encoder(x_adv)[1]
+            x_adv_emb = extract_embeddings(model, encoder, model_name, x_adv)
             # L2 distance
             l2_dist = torch.norm((noise).view(len(noise), -1), p=2, dim=1)
 
@@ -119,7 +130,7 @@ def uap_sgd(model, tokenizer, image_processor, clip_model, clip_preprocessor, lo
             if epoch % 100 == 99:
                 print(f'Epoch #{epoch+1} loss: {loss.data[0]:.4f}')
             
-        adv_pred = predict(model, tokenizer, image_processor, x_adv)[0]
+        adv_pred = predict(model_name, model, tokenizer, image_processor, x_adv)[0]
         print(f'After attack:\n\t{adv_pred}')
         
         adv_tokenized = clip.tokenize(adv_pred).cuda()
@@ -137,7 +148,9 @@ def uap_sgd(model, tokenizer, image_processor, clip_model, clip_preprocessor, lo
 
 if __name__ == '__main__':    
     parser = argparse.ArgumentParser(description="Image-to-Text Attack")
-    parser.add_argument("--model", type=str, help="Model name (str)", default='vit-gpt2')
+    parser.add_argument("--model", type=str, 
+                       choices=['vit-gpt2', 'blip', 'git-base'], 
+                       help="Model name (str)", default='vit-gpt2')
     parser.add_argument("--dataset", type=str, help="Dataset name (str)", default='flickr30k')
     parser.add_argument("--eps", type=float, help="Epsilon value (float)", default=50/255)
     parser.add_argument("--n_epochs", type=int, help="Number of epochs (int)", default=1000)
@@ -155,7 +168,21 @@ if __name__ == '__main__':
     image_processor, tokenizer, model, encoder, mean, std = load_model(model_name=model)
     dataloader = load_dataset(dataset, image_processor)
     
-    total_losses, clip_losses = uap_sgd(model=model, tokenizer=tokenizer, image_processor=image_processor, clip_model=clip_model, clip_preprocessor=clip_preprocessor, loader=dataloader, nb_epoch=nb_epoch, eps=eps, c = 0.1, targeted=False, lr=0.01, nb_imgs=n_imgs)
+    total_losses, clip_losses = uap_sgd(
+        model=model,
+        model_name=model,  # Pass model_name as argument
+        tokenizer=tokenizer, 
+        image_processor=image_processor, 
+        clip_model=clip_model, 
+        clip_preprocessor=clip_preprocessor, 
+        loader=dataloader, 
+        nb_epoch=nb_epoch, 
+        eps=eps, 
+        c=0.1,
+        targeted=False, 
+        lr=0.01, 
+        nb_imgs=n_imgs
+    )
     mean_loss = 0
     for loss in total_losses:
         last_loss = loss[-1]
