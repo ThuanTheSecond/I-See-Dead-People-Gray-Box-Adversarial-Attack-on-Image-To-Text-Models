@@ -131,9 +131,17 @@ def predict(model_name, model, tokenizer, feature_extractor, image):
         case 'git-base':
             with torch.no_grad():
                 if image.shape[0] == 2:
-                    # Handle batch size of 2 (for targeted attack)
-                    inputs1 = feature_extractor(images=image[0].unsqueeze(0), return_tensors="pt").to(image.device)
-                    inputs2 = feature_extractor(images=image[1].unsqueeze(0), return_tensors="pt").to(image.device)
+                    # Convert tensors to PIL Images for Git
+                    from torchvision.transforms import ToPILImage
+                    to_pil = ToPILImage()
+                    
+                    # Handle normalization properly
+                    img1 = to_pil(image[0].cpu().detach().clamp(0, 1))  # Ensure values are in [0,1]
+                    img2 = to_pil(image[1].cpu().detach().clamp(0, 1))
+                    
+                    # Now process the PIL images
+                    inputs1 = feature_extractor(images=img1, return_tensors="pt").to(image.device)
+                    inputs2 = feature_extractor(images=img2, return_tensors="pt").to(image.device)
                     
                     output_ids1 = model.generate(pixel_values=inputs1.pixel_values, max_length=16, num_beams=4)
                     output_ids2 = model.generate(pixel_values=inputs2.pixel_values, max_length=16, num_beams=4)
@@ -142,8 +150,17 @@ def predict(model_name, model, tokenizer, feature_extractor, image):
                     preds2 = tokenizer.decode(output_ids2[0], skip_special_tokens=True)
                     preds = [preds1, preds2]
                 else:
-                    # Handle single image or other batch sizes
-                    inputs = feature_extractor(images=image, return_tensors="pt").to(image.device)
+                    # Handle single image case
+                    from torchvision.transforms import ToPILImage
+                    to_pil = ToPILImage()
+                    
+                    # Convert single tensor to PIL
+                    if image.dim() == 4:  # Batch of images
+                        img = to_pil(image[0].cpu().detach().clamp(0, 1))
+                    else:  # Single image
+                        img = to_pil(image.cpu().detach().clamp(0, 1))
+                        
+                    inputs = feature_extractor(images=img, return_tensors="pt").to(image.device)
                     output_ids = model.generate(pixel_values=inputs.pixel_values, max_length=16, num_beams=4)
                     preds = tokenizer.batch_decode(output_ids, skip_special_tokens=True)
                     preds = [pred.strip() for pred in preds]
