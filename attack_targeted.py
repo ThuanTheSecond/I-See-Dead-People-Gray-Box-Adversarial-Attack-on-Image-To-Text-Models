@@ -31,7 +31,7 @@ def extract_embeddings(model, encoder, model_name, x):
         return encoder(x)[1]
 
 
-def uap_sgd(model, model_name, encoder, tokenizer, image_processor, image_mean, image_std, clip_model, loader, nb_epoch, eps, c = 0.1, targeted=False, lr=0.01, nb_imgs=1000):
+def uap_sgd(model, model_name, encoder, tokenizer, image_processor, image_mean, image_std, clip_model, loader, nb_epoch, eps, c = 0.1, targeted=True, lr=0.01, nb_imgs=1000):
     '''
     INPUT
     model       model
