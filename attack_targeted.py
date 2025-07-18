@@ -20,7 +20,12 @@ def extract_embeddings(model, encoder, model_name, x):
     """Extract embeddings based on model type"""
     if model_name == 'git-base':
         # Git uses a different embedding extraction method
-        return encoder(x).pooler_output
+        output = encoder(x)
+        if hasattr(output, 'pooler_output'):
+            return output.pooler_output
+        else:
+            return output.last_hidden_state.mean(dim=1)
+        
     else:
         # Original code for vit-gpt2 and blip
         return encoder(x)[1]
