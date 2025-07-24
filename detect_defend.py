@@ -10,7 +10,8 @@ from collections import Counter
 
 class ClipTransformDefender:
     def __init__(self, clip_model, model, model_name, tokenizer, image_processor, 
-                 detection_threshold=0.75, device='cuda'):
+                 detection_threshold=0.8, transform_var_threshold=0.05, transform_mean_threshold=0.8,
+                 device='cuda'):
         """
         Phòng thủ kết hợp CLIP và Input Transformation
         
@@ -28,8 +29,6 @@ class ClipTransformDefender:
         self.model_name = model_name
         self.tokenizer = tokenizer
         self.image_processor = image_processor
-        self.threshold = detection_threshold
-        self.device = device
         
         # Định nghĩa các biến đổi đầu vào
         self.transformations = [
@@ -41,6 +40,12 @@ class ClipTransformDefender:
             ('bit_depth', self._bit_depth_reduction),
             ('color_jitter', transforms.ColorJitter(brightness=0.1, contrast=0.1)),
         ]
+        
+        # Thêm các tham số điều chỉnh ngưỡng
+        self.threshold = detection_threshold
+        self.transform_var_threshold = transform_var_threshold
+        self.transform_mean_threshold = transform_mean_threshold
+        self.device = device
         
     def _jpeg_compress(self, img, quality=90):
         """Áp dụng JPEG compression"""
@@ -111,9 +116,9 @@ class ClipTransformDefender:
             
             # Đánh giá dựa trên các metrics
             is_semantic_inconsistent = similarity < self.threshold
-            is_unstable_to_transforms = transform_variance > 0.03 or transform_mean < 0.85
+            is_unstable_to_transforms = transform_variance > self.transform_var_threshold or transform_mean < self.transform_mean_threshold
             
-            # Đánh giá loại tấn công
+            # Yêu cầu đồng thời cả hai điều kiện để tăng độ chính xác
             if is_semantic_inconsistent and is_unstable_to_transforms:
                 is_adversarial = True
                 confidence = 0.7 + (1.0 - similarity) * 0.3  # 0.7-1.0
@@ -336,28 +341,45 @@ if __name__ == "__main__":
             batch = {k: v.cuda() if k != "caption" else v for k, v in batch.items()}
             image = batch['image'][0]  # Lấy ảnh đầu tiên trong batch
             
-            # Tạo nhiễu đối nghịch giả lập (có thể thay thế bằng tấn công thực tế)
+            # --- THAY ĐỔI: Đánh giá riêng hình ảnh gốc và hình ảnh tấn công ---
+            
+            # 1. Đánh giá hình ảnh gốc (không thêm nhiễu)
+            from utils import predict
+            orig_caption = predict(args.model, model, tokenizer, image_processor, image.unsqueeze(0))[0]
+            
+            # Phát hiện trên hình ảnh gốc
+            is_clean_adv, clean_conf, clean_type = defender.detect_attack(image, orig_caption)
+            
+            # 2. Tạo một phiên bản bị tấn công (thêm nhiễu)
             noise = torch.randn_like(image) * 0.05
             adv_img = torch.clamp(image + noise, -1, 1)
             
-            # Dự đoán caption gốc và caption bị tấn công
-            from utils import predict
-            orig_caption = predict(args.model, model, tokenizer, image_processor, image.unsqueeze(0))[0]
+            # Dự đoán caption cho ảnh bị tấn công
             adv_caption = predict(args.model, model, tokenizer, image_processor, adv_img.unsqueeze(0))[0]
             
-            # Phát hiện và phòng thủ
+            # Phát hiện trên ảnh bị tấn công
             is_adv, conf, attack_type = defender.detect_attack(adv_img, adv_caption)
+            
+            # Phòng thủ ảnh bị tấn công
             defended_caption, def_conf, def_info = defender.defend(adv_img, orig_caption)
             
-            # Lưu kết quả
+            # Lưu cả hai kết quả
             result = {
                 'sample_id': i,
                 'original_caption': orig_caption,
                 'adversarial_caption': adv_caption,
                 'defended_caption': defended_caption,
-                'is_adversarial': is_adv,
-                'detection_confidence': conf,
-                'attack_type': attack_type,
+                
+                # Kết quả trên ảnh gốc
+                'clean_detected_as_adversarial': is_clean_adv,
+                'clean_detection_confidence': clean_conf,
+                'clean_attack_type': clean_type,
+                
+                # Kết quả trên ảnh nhiễu
+                'noisy_detected_as_adversarial': is_adv,
+                'noisy_detection_confidence': conf,
+                'noisy_attack_type': attack_type,
+                
                 'defense_confidence': def_conf,
                 'defense_method': def_info['defense_method']
             }
@@ -368,8 +390,11 @@ if __name__ == "__main__":
             if i < 3 or i % 10 == 0:
                 print(f"\n=== Sample {i} ===")
                 print(f"Original caption: {orig_caption}")
+                print(f"-- CLEAN IMAGE DETECTION --")
+                print(f"Is detected as adversarial: {is_clean_adv} (confidence: {clean_conf:.4f}, type: {clean_type})")
+                print(f"-- NOISY IMAGE DETECTION --")
                 print(f"Adversarial caption: {adv_caption}")
-                print(f"Is adversarial: {is_adv} (confidence: {conf:.4f}, type: {attack_type})")
+                print(f"Is detected as adversarial: {is_adv} (confidence: {conf:.4f}, type: {attack_type})")
                 print(f"Defended caption: {defended_caption} (confidence: {def_conf:.4f})")
                 print(f"Defense method: {def_info['defense_method']}")
                 
@@ -386,21 +411,29 @@ if __name__ == "__main__":
         df.to_csv(output_file, index=False)
         print(f"Results saved to {output_file}")
         
-        # Tính toán thống kê
-        detection_accuracy = df['is_adversarial'].mean()
+        # Tính toán thống kê phân biệt
+        clean_detection_accuracy = df['clean_detected_as_adversarial'].mean()
+        noisy_detection_accuracy = df['noisy_detected_as_adversarial'].mean()
         defense_confidence_avg = df['defense_confidence'].mean()
         
         # Phân tích phân phối loại tấn công được phát hiện
-        attack_type_counts = df['attack_type'].value_counts()
+        clean_attack_type_counts = df['clean_attack_type'].value_counts()
+        noisy_attack_type_counts = df['noisy_attack_type'].value_counts()
         defense_method_counts = df['defense_method'].value_counts()
         
         # In thống kê
         print("\n=== Evaluation Statistics ===")
         print(f"Total samples processed: {len(df)}")
-        print(f"Detection accuracy: {detection_accuracy:.4f}")
+        print(f"Clean images detected as adversarial: {clean_detection_accuracy:.4f}")
+        print(f"Noisy images detected as adversarial: {noisy_detection_accuracy:.4f}")
         print(f"Average defense confidence: {defense_confidence_avg:.4f}")
-        print(f"\nDetected attack types:")
-        for attack_type, count in attack_type_counts.items():
+        
+        print(f"\nDetected attack types in clean images:")
+        for attack_type, count in clean_attack_type_counts.items():
+            print(f"  - {attack_type}: {count} ({count/len(df)*100:.1f}%)")
+        
+        print(f"\nDetected attack types in noisy images:")
+        for attack_type, count in noisy_attack_type_counts.items():
             print(f"  - {attack_type}: {count} ({count/len(df)*100:.1f}%)")
         
         print(f"\nDefense methods used:")
@@ -410,13 +443,13 @@ if __name__ == "__main__":
         # Vẽ biểu đồ
         plt.figure(figsize=(12, 6))
         plt.subplot(1, 2, 1)
-        attack_type_counts.plot(kind='bar')
-        plt.title('Detected Attack Types')
+        clean_attack_type_counts.plot(kind='bar')
+        plt.title('Detected Attack Types in Clean Images')
         plt.ylabel('Count')
         
         plt.subplot(1, 2, 2)
-        defense_method_counts.plot(kind='bar')
-        plt.title('Defense Methods Used')
+        noisy_attack_type_counts.plot(kind='bar')
+        plt.title('Detected Attack Types in Noisy Images')
         plt.ylabel('Count')
         
         plt.tight_layout()
