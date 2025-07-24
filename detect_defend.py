@@ -259,22 +259,16 @@ def test_defender(image_path, model_name='vit-gpt2'):
         image_processor=image_processor
     )
     
-    # Tạo nhiễu đối nghịch giả lập
-    noise = torch.randn_like(img_tensor) * 0.05
-    adv_img = torch.clamp(img_tensor + noise, -1, 1)
-    
-    # Dự đoán caption gốc và caption bị tấn công
+    # Dự đoán caption cho ảnh đầu vào
     from utils import predict
     orig_caption = predict(model_name, model, tokenizer, image_processor, img_tensor.unsqueeze(0))[0]
-    adv_caption = predict(model_name, model, tokenizer, image_processor, adv_img.unsqueeze(0))[0]
     
     # Phát hiện và phòng thủ
-    is_adv, conf, attack_type = defender.detect_attack(adv_img, adv_caption)
-    defended_caption, def_conf, def_info = defender.defend(adv_img, orig_caption)
+    is_adv, conf, attack_type = defender.detect_attack(img_tensor, orig_caption)
+    defended_caption, def_conf, def_info = defender.defend(img_tensor, orig_caption)
     
     # In kết quả
     print(f"Original caption: {orig_caption}")
-    print(f"Adversarial caption: {adv_caption}")
     print(f"Is adversarial: {is_adv} (confidence: {conf:.4f}, type: {attack_type})")
     print(f"Defended caption: {defended_caption} (confidence: {def_conf:.4f})")
     print(f"Defense method: {def_info['defense_method']}")
