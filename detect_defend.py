@@ -282,11 +282,143 @@ if __name__ == "__main__":
     
     # Hoặc chạy đầy đủ trên dataset
     import argparse
+    from utils import load_model, load_dataset
+    import clip
+    import pandas as pd
+    from tqdm import tqdm
+    import matplotlib.pyplot as plt
     
     parser = argparse.ArgumentParser(description="CLIP + Input Transformation Defense")
     parser.add_argument("--model", type=str, default="vit-gpt2", help="Model name")
     parser.add_argument("--dataset", type=str, default="flickr30k", help="Dataset name")
     parser.add_argument("--num_samples", type=int, default=10, help="Number of samples to test")
+    parser.add_argument("--test_image", type=str, default="", help="Single test image path (optional)")
     args = parser.parse_args()
     
-    # Implement full evaluation here
+    # Test với một ảnh cụ thể nếu được chỉ định
+    if args.test_image:
+        print(f"Testing with single image: {args.test_image}")
+        defender = test_defender(args.test_image, args.model)
+        exit(0)
+    
+    # Chạy đánh giá trên dataset
+    print(f"Running evaluation on {args.dataset} with model {args.model}, {args.num_samples} samples")
+    
+    # Load models
+    print("Loading models...")
+    clip_model, _ = clip.load("ViT-B/32", device='cuda')
+    image_processor, tokenizer, model, encoder, _, _ = load_model(args.model)
+    
+    # Load dataset
+    print("Loading dataset...")
+    dataloader = load_dataset(args.dataset, image_processor, batch_size=1)
+    
+    # Khởi tạo defender
+    print("Initializing defender...")
+    defender = ClipTransformDefender(
+        clip_model=clip_model,
+        model=model, 
+        model_name=args.model,
+        tokenizer=tokenizer,
+        image_processor=image_processor
+    )
+    
+    # Thực hiện đánh giá
+    results = []
+    print("Starting evaluation...")
+    
+    for i, batch in tqdm(enumerate(dataloader), total=args.num_samples):
+        if i >= args.num_samples:
+            break
+        
+        try:
+            # Chuẩn bị dữ liệu
+            batch = {k: v.cuda() if k != "caption" else v for k, v in batch.items()}
+            image = batch['image'][0]  # Lấy ảnh đầu tiên trong batch
+            
+            # Tạo nhiễu đối nghịch giả lập (có thể thay thế bằng tấn công thực tế)
+            noise = torch.randn_like(image) * 0.05
+            adv_img = torch.clamp(image + noise, -1, 1)
+            
+            # Dự đoán caption gốc và caption bị tấn công
+            from utils import predict
+            orig_caption = predict(args.model, model, tokenizer, image_processor, image.unsqueeze(0))[0]
+            adv_caption = predict(args.model, model, tokenizer, image_processor, adv_img.unsqueeze(0))[0]
+            
+            # Phát hiện và phòng thủ
+            is_adv, conf, attack_type = defender.detect_attack(adv_img, adv_caption)
+            defended_caption, def_conf, def_info = defender.defend(adv_img, orig_caption)
+            
+            # Lưu kết quả
+            result = {
+                'sample_id': i,
+                'original_caption': orig_caption,
+                'adversarial_caption': adv_caption,
+                'defended_caption': defended_caption,
+                'is_adversarial': is_adv,
+                'detection_confidence': conf,
+                'attack_type': attack_type,
+                'defense_confidence': def_conf,
+                'defense_method': def_info['defense_method']
+            }
+            
+            results.append(result)
+            
+            # In kết quả mẫu
+            if i < 3 or i % 10 == 0:
+                print(f"\n=== Sample {i} ===")
+                print(f"Original caption: {orig_caption}")
+                print(f"Adversarial caption: {adv_caption}")
+                print(f"Is adversarial: {is_adv} (confidence: {conf:.4f}, type: {attack_type})")
+                print(f"Defended caption: {defended_caption} (confidence: {def_conf:.4f})")
+                print(f"Defense method: {def_info['defense_method']}")
+                
+        except Exception as e:
+            print(f"Error processing sample {i}: {e}")
+    
+    # Tính toán và in thống kê
+    if results:
+        # Chuyển kết quả thành DataFrame
+        df = pd.DataFrame(results)
+        
+        # Lưu kết quả
+        output_file = f"defense_results_{args.model}_{args.dataset}.csv"
+        df.to_csv(output_file, index=False)
+        print(f"Results saved to {output_file}")
+        
+        # Tính toán thống kê
+        detection_accuracy = df['is_adversarial'].mean()
+        defense_confidence_avg = df['defense_confidence'].mean()
+        
+        # Phân tích phân phối loại tấn công được phát hiện
+        attack_type_counts = df['attack_type'].value_counts()
+        defense_method_counts = df['defense_method'].value_counts()
+        
+        # In thống kê
+        print("\n=== Evaluation Statistics ===")
+        print(f"Total samples processed: {len(df)}")
+        print(f"Detection accuracy: {detection_accuracy:.4f}")
+        print(f"Average defense confidence: {defense_confidence_avg:.4f}")
+        print(f"\nDetected attack types:")
+        for attack_type, count in attack_type_counts.items():
+            print(f"  - {attack_type}: {count} ({count/len(df)*100:.1f}%)")
+        
+        print(f"\nDefense methods used:")
+        for method, count in defense_method_counts.items():
+            print(f"  - {method}: {count} ({count/len(df)*100:.1f}%)")
+        
+        # Vẽ biểu đồ
+        plt.figure(figsize=(12, 6))
+        plt.subplot(1, 2, 1)
+        attack_type_counts.plot(kind='bar')
+        plt.title('Detected Attack Types')
+        plt.ylabel('Count')
+        
+        plt.subplot(1, 2, 2)
+        defense_method_counts.plot(kind='bar')
+        plt.title('Defense Methods Used')
+        plt.ylabel('Count')
+        
+        plt.tight_layout()
+        plt.savefig(f"defense_results_{args.model}_{args.dataset}.png")
+        print(f"Charts saved to defense_results_{args.model}_{args.dataset}.png")
