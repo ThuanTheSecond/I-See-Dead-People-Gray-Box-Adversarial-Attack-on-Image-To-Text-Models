@@ -89,7 +89,12 @@ class ClipTransformDefender:
         try:
             image_resized = TF.resize(image, (224, 224), antialias=True)
             with torch.no_grad():
-                image_features = self.clip_model.encode_image(image_resized.unsqueeze(0))
+                # Check if image is batched (4D) or unbatched (3D)
+                if image_resized.dim() == 3:
+                    image_features = self.clip_model.encode_image(image_resized.unsqueeze(0))
+                else:
+                    image_features = self.clip_model.encode_image(image_resized)
+                
                 text_tokens = clip.tokenize([caption]).to(self.device)
                 text_features = self.clip_model.encode_text(text_tokens)
                 similarity = F.cosine_similarity(image_features, text_features).item()
@@ -102,7 +107,10 @@ class ClipTransformDefender:
                         try:
                             transformed = future.result()
                             transformed_resized = TF.resize(transformed, (224, 224), antialias=True)
-                            transformed_features = self.clip_model.encode_image(transformed_resized.unsqueeze(0))
+                            if transformed_resized.dim() == 3:
+                                transformed_features = self.clip_model.encode_image(transformed_resized.unsqueeze(0))
+                            else:
+                                transformed_features = self.clip_model.encode_image(transformed_resized)
                             transform_sim = F.cosine_similarity(image_features, transformed_features).item()
                             transform_similarities.append(transform_sim)
                         except Exception as e:
@@ -225,7 +233,7 @@ class ClipTransformDefender:
 
     def _apply_transform_and_predict(self, image, name, transform):
         """Apply transformation and predict caption."""
-        try:
+        try: 
             transformed = transform(image)
             caption = predict(
                 self.model_name, 
@@ -236,7 +244,10 @@ class ClipTransformDefender:
             )[0]
             transformed_resized = TF.resize(transformed, (224, 224), antialias=True)
             with torch.no_grad():
-                image_features = self.clip_model.encode_image(transformed_resized.unsqueeze(0))
+                if transformed_resized.dim() == 3:
+                    image_features = self.clip_model.encode_image(transformed_resized.unsqueeze(0))
+                else:
+                    image_features = self.clip_model.encode_image(transformed_resized)
                 text_tokens = clip.tokenize([caption]).to(self.device)
                 text_features = self.clip_model.encode_text(text_tokens)
                 similarity = F.cosine_similarity(image_features, text_features).item()
