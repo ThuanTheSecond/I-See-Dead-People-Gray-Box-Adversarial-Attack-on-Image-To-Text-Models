@@ -311,12 +311,12 @@ if __name__ == "__main__":
         print(f"Defense info: {defense_info}")
     else:
         # Process images from dataset
-        for i, (image, caption, image_id) in enumerate(dataloader):
+        for i, batch in enumerate(dataloader):
             if i >= args.num_images:
                 break
-            image = image.to(device)
-            caption = caption[0] if args.caption is None else args.caption
-            image_id = image_id[0] if args.image_id is None else args.image_id
+            image = batch['image'].to(device)
+            caption = batch['caption'][0] if args.caption is None else args.caption
+            image_id = batch['image_id'][0] if args.image_id is None else args.image_id
             print(f"\nProcessing image {i+1}/{args.num_images} (ID: {image_id})")
             caption, confidence, defense_info = defender.defend(
                 image=image,

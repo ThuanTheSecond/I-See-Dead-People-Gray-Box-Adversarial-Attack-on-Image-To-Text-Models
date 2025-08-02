@@ -1,9 +1,8 @@
 import pandas as pd
 import torch
 from transformers import AutoProcessor, AutoModelForCausalLM
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from dataset import Flickr30k
-from torch.utils.data import Subset
 
 def load_git_model(device='cuda'):
     """
@@ -58,7 +57,7 @@ def load_dataset(dataset, image_processor, batch_size=1, num_images=1):
         num_images: Number of images to load from dataset (default: 1).
     
     Returns:
-        dataloader: DataLoader for the specified dataset.
+        dataloader: DataLoader for the specified dataset, yielding batches with image, caption, and image_id.
     """
     try:
         if dataset == 'flickr30k':
@@ -94,11 +93,23 @@ def load_dataset(dataset, image_processor, batch_size=1, num_images=1):
         indices = list(range(min(num_images, len(dataset))))
         dataset = Subset(dataset, indices)
         
+        # Custom collate function to include image_id
+        def collate_fn(batch):
+            images = torch.stack([item['image'] for item in batch])
+            captions = [item['caption'] for item in batch]
+            image_ids = [dataset.dataset.image_filenames[dataset.indices[i]] for i in range(len(batch))]
+            return {
+                'image': images,
+                'caption': captions,
+                'image_id': image_ids
+            }
+        
         dataloader = DataLoader(
             dataset,
             batch_size=batch_size,
             num_workers=1,
-            shuffle=False
+            shuffle=False,
+            collate_fn=collate_fn
         )
         return dataloader
     except Exception as e:
