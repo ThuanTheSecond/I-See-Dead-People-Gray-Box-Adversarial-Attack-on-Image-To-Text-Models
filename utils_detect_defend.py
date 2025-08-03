@@ -49,15 +49,6 @@ def get_caption_from_csv(csv_path, image_id):
 def load_dataset(dataset, image_processor, batch_size=1, num_images=1):
     """
     Load dataset for evaluation, limited to specified number of images.
-    
-    Args:
-        dataset: Dataset name ('flickr30k', 'targeted_attack', or 'untargeted_attack').
-        image_processor: Image processor for the captioning model.
-        batch_size: Batch size for DataLoader (default: 1).
-        num_images: Number of images to load from dataset (default: 1).
-    
-    Returns:
-        dataloader: DataLoader for the specified dataset, yielding batches with image, caption, and image_id.
     """
     try:
         if dataset == 'flickr30k':
@@ -69,8 +60,7 @@ def load_dataset(dataset, image_processor, batch_size=1, num_images=1):
                 transform=image_processor,
             )
         elif dataset == 'targeted_attack':
-            # Placeholder: Assume CSV with targeted attack images and captions
-            csv_path = "/path/to/targeted_attack_captions.csv"  # Update with actual path
+            csv_path = "/path/to/targeted_attack_captions.csv"
             df = pd.read_csv(csv_path)
             dataset = Flickr30k(
                 df["image"].values,
@@ -78,8 +68,7 @@ def load_dataset(dataset, image_processor, batch_size=1, num_images=1):
                 transform=image_processor,
             )
         elif dataset == 'untargeted_attack':
-            # Placeholder: Assume CSV with untargeted attack images and captions
-            csv_path = "/path/to/untargeted_attack_captions.csv"  # Update with actual path
+            csv_path = "/path/to/untargeted_attack_captions.csv"
             df = pd.read_csv(csv_path)
             dataset = Flickr30k(
                 df["image"].values,
@@ -95,11 +84,17 @@ def load_dataset(dataset, image_processor, batch_size=1, num_images=1):
         
         # Custom collate function to include image_id
         def collate_fn(batch):
+            # Sửa lỗi: xử lý đúng batch dimension
             images = torch.stack([item['image'] for item in batch])
             captions = [item['caption'] for item in batch]
-            image_ids = [dataset.dataset.image_filenames[dataset.indices[i]] for i in range(len(batch))]
+            # Sửa lỗi: truy xuất đúng image_filenames từ subset
+            image_ids = []
+            for i in range(len(batch)):
+                idx = dataset.indices[i]
+                image_ids.append(dataset.dataset.image_filenames[idx])
+            
             return {
-                'image': images,
+                'image': images.squeeze(1) if images.dim() == 5 else images,  # Loại bỏ dimension thừa
                 'caption': captions,
                 'image_id': image_ids
             }

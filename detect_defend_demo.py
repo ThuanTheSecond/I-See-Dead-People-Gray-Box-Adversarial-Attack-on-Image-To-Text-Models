@@ -59,30 +59,55 @@ class ClipTransformDefender:
         if self.use_git:
             self.git_processor, self.git_model = load_git_model(device)
 
-    def _median_filter(self, img, kernel_size=3):
-        """Apply median filter using scipy.ndimage."""
-        np_img = img.cpu().numpy()
-        if len(np_img.shape) == 3:
-            np_img = np_img.transpose(1, 2, 0)
-        filtered = ndimage.median_filter(np_img, size=kernel_size)
-        if len(filtered.shape) == 3 and filtered.shape[2] == 3:
-            filtered = filtered.transpose(2, 0, 1)
-        return torch.from_numpy(filtered).to(self.device)
-
     def _jpeg_compress(self, img, quality=90):
         """Apply JPEG compression with specified quality."""
-        img_pil = TF.to_pil_image((img + 1)/2)
-        buffer = io.BytesIO()
-        img_pil.save(buffer, format='JPEG', quality=quality)
-        buffer.seek(0)
-        return TF.to_tensor(Image.open(buffer)).to(self.device) * 2 - 1
+        try:
+            # Đảm bảo tensor có đúng định dạng
+            if img.dim() != 3:
+                raise ValueError(f"Expected 3D tensor, got {img.dim()}D")
+            
+            # Chuyển từ [-1,1] về [0,1] cho PIL
+            img_normalized = (img + 1) / 2
+            img_pil = TF.to_pil_image(img_normalized.cpu())
+            
+            buffer = io.BytesIO()
+            img_pil.save(buffer, format='JPEG', quality=quality)
+            buffer.seek(0)
+            
+            # Chuyển lại về [-1,1]
+            compressed = TF.to_tensor(Image.open(buffer)).to(self.device)
+            return compressed * 2 - 1
+        except Exception as e:
+            print(f"JPEG compression error: {str(e)}")
+            return img
+
+    def _median_filter(self, img, kernel_size=3):
+        """Apply median filter using scipy.ndimage."""
+        try:
+            if img.dim() != 3:
+                raise ValueError(f"Expected 3D tensor, got {img.dim()}D")
+            
+            np_img = img.cpu().numpy().transpose(1, 2, 0)  # CHW -> HWC
+            filtered = ndimage.median_filter(np_img, size=kernel_size)
+            filtered = filtered.transpose(2, 0, 1)  # HWC -> CHW
+            return torch.from_numpy(filtered).to(self.device)
+        except Exception as e:
+            print(f"Median filter error: {str(e)}")
+            return img
 
     def _bit_depth_reduction(self, img, bits=5):
         """Reduce bit depth of the image."""
-        img = torch.clamp(img, -1, 1)
-        max_val = 2**bits - 1
-        img_scaled = ((img + 1) / 2 * max_val).round() / max_val
-        return img_scaled * 2 - 1
+        try:
+            if img.dim() != 3:
+                raise ValueError(f"Expected 3D tensor, got {img.dim()}D")
+            
+            img = torch.clamp(img, -1, 1)
+            max_val = 2**bits - 1
+            img_scaled = ((img + 1) / 2 * max_val).round() / max_val
+            return img_scaled * 2 - 1
+        except Exception as e:
+            print(f"Bit depth reduction error: {str(e)}")
+            return img
 
     def detect_attack(self, image, caption):
         """Detect adversarial attack by checking semantic consistency and transform stability."""
@@ -138,33 +163,28 @@ class ClipTransformDefender:
     def defend(self, image, image_id=None, original_caption=None):
         """
         Defend against adversarial attack by generating a reliable caption.
-        
-        Args:
-            image: Input image tensor.
-            image_id: Image identifier (e.g., filename) to lookup caption in CSV (optional).
-            original_caption: Reference caption (optional).
-        
-        Returns:
-            caption: Final caption (original or defended).
-            confidence: Confidence score.
-            defense_info: Dictionary with detection and defense details.
         """
         try:
+            # Đảm bảo image có đúng định dạng (3D tensor: C, H, W)
+            if image.dim() == 4:
+                image = image.squeeze(0)  # Loại bỏ batch dimension nếu có
+            elif image.dim() == 2:
+                raise ValueError("Image tensor should be 3D (C, H, W)")
+            
             if original_caption is None and image_id is not None and self.use_csv:
-                # Lookup caption from CSV if enabled and image_id provided
                 original_caption = get_caption_from_csv(self.csv_path, image_id)
                 print("Use original caption in caption.txt")
             
             if original_caption is None and self.use_git:
-                # Generate temporary caption using GIT if enabled
-                inputs = self.git_processor(images=image, return_tensors="pt").to(self.device)
+                # Chuẩn bị image cho GIT (cần format [0,1])
+                git_image = (image + 1) / 2  # Chuyển từ [-1,1] về [0,1]
+                inputs = self.git_processor(images=git_image, return_tensors="pt").to(self.device)
                 with torch.no_grad():
                     outputs = self.git_model.generate(**inputs, max_length=16)
                 original_caption = self.git_processor.batch_decode(outputs, skip_special_tokens=True)[0]
                 print('Original caption is None, Use GIT to generate caption')
             
             if original_caption is None:
-                # Fallback: assume attack and proceed to defense
                 is_adversarial, confidence, attack_type = True, 0.5, "unknown"
             else:
                 is_adversarial, confidence, attack_type = self.detect_attack(image, original_caption)
@@ -183,28 +203,24 @@ class ClipTransformDefender:
             # Defense: generate captions from transformed images
             captions = []
             similarities = []
-            with ThreadPoolExecutor() as executor:
-                futures = []
-                for name, transform in self.transformations:
+            
+            # Xử lý tuần tự thay vì đa luồng để tránh lỗi
+            for name, transform in self.transformations:
+                try:
                     img_copy = image.clone()
-                    futures.append(executor.submit(
-                        self._apply_transform_and_predict,
+                    name, caption, similarity = self._apply_transform_and_predict(
                         img_copy, name, transform
-                    ))
-                
-                for future in as_completed(futures):
-                    try:
-                        name, caption, similarity = future.result()
-                        captions.append(caption)
-                        similarities.append(similarity)
-                        defense_info['transformations'].append({
-                            'name': name,
-                            'caption': caption,
-                            'similarity': similarity
-                        })
-                    except Exception as e:
-                        print(f"Defense transform error ({name}): {str(e)[:100]}")
-                        continue
+                    )
+                    captions.append(caption)
+                    similarities.append(similarity)
+                    defense_info['transformations'].append({
+                        'name': name,
+                        'caption': caption,
+                        'similarity': similarity
+                    })
+                except Exception as e:
+                    print(f"Defense transform error ({name}): {str(e)[:100]}")
+                    continue
             
             if not captions:
                 print("No captions generated, returning original or empty caption")
@@ -327,9 +343,16 @@ if __name__ == "__main__":
         for i, batch in enumerate(dataloader):
             if i >= args.num_images:
                 break
-            image = batch['image'].to(device)
+            
+            # Sửa lỗi: đảm bảo tensor có đúng định dạng
+            image = batch['image']
+            if image.dim() == 4:  # Batch dimension
+                image = image[0]  # Lấy ảnh đầu tiên
+            
+            image = image.to(device)
             caption = batch['caption'][0] if args.caption is None else args.caption
             image_id = batch['image_id'][0] if args.image_id is None else args.image_id
+            
             print(f"\nProcessing image {i+1}/{args.num_images} (ID: {image_id})")
             caption, confidence, defense_info = defender.defend(
                 image=image,
