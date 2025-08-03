@@ -16,7 +16,7 @@ from utils import predict
 class ClipTransformDefender:
     def __init__(self, clip_model, model, model_name, tokenizer, image_processor, 
                  detection_threshold=0.85, transform_var_threshold=0.08, transform_mean_threshold=0.75,
-                 device='cuda', use_csv=True, use_git=False):
+                 device='cuda', use_caption=True, no_caption=False):
         """
         Initialize ClipTransformDefender with CLIP and captioning models.
         
@@ -30,8 +30,8 @@ class ClipTransformDefender:
             transform_var_threshold: Variance threshold for transform stability (default: 0.08).
             transform_mean_threshold: Mean threshold for transform stability (default: 0.75).
             device: Device to run models ('cuda' or 'cpu').
-            use_csv: Whether to read captions from CSV file (default: True).
-            use_git: Whether to use GIT model for generating temporary captions (default: False).
+            use_caption: Whether to read captions from caption.txt file (default: True).
+            no_caption: Whether to use GIT model for generating captions instead of original (default: False).
         """
         self.clip_model = clip_model
         self.model = model
@@ -39,9 +39,9 @@ class ClipTransformDefender:
         self.tokenizer = tokenizer
         self.image_processor = image_processor
         self.device = device
-        self.use_csv = use_csv
-        self.use_git = use_git
-        self.csv_path = "/kaggle/input/flickr30k/captions.txt" if use_csv else None
+        self.use_caption = use_caption
+        self.no_caption = no_caption
+        self.csv_path = "/kaggle/input/flickr30k/captions.txt" if use_caption else None
         self.transformations = [
             ('original', lambda x: x),
             ('jpeg_75', lambda x: self._jpeg_compress(x, 75)),
@@ -55,8 +55,8 @@ class ClipTransformDefender:
         self.transform_var_threshold = transform_var_threshold
         self.transform_mean_threshold = transform_mean_threshold
         
-        # Initialize GIT model if use_git is True
-        if self.use_git:
+        # Initialize GIT model if no_caption is True
+        if self.no_caption:
             self.git_processor, self.git_model = load_git_model(device)
 
     def _jpeg_compress(self, img, quality=90):
@@ -171,19 +171,54 @@ class ClipTransformDefender:
             elif image.dim() == 2:
                 raise ValueError("Image tensor should be 3D (C, H, W)")
             
-            if original_caption is None and image_id is not None and self.use_csv:
-                original_caption = get_caption_from_csv(self.csv_path, image_id)
-                print("Use original caption in caption.txt")
+            # Flow logic theo yêu cầu:
+            # 1. Ưu tiên dùng caption được đưa vào trực tiếp
+            if original_caption is not None:
+                print(f"Using provided caption: {original_caption}")
             
-            if original_caption is None and self.use_git:
+            # 2. Nếu no_caption là True, dùng GIT để tạo caption (bỏ qua caption.txt)
+            elif self.no_caption:
                 # Chuẩn bị image cho GIT (cần format [0,1])
                 git_image = (image + 1) / 2  # Chuyển từ [-1,1] về [0,1]
                 inputs = self.git_processor(images=git_image, return_tensors="pt").to(self.device)
                 with torch.no_grad():
                     outputs = self.git_model.generate(**inputs, max_length=16)
                 original_caption = self.git_processor.batch_decode(outputs, skip_special_tokens=True)[0]
-                print('Original caption is None, Use GIT to generate caption')
+                print("Don't use original caption in captions.txt, Use GIT to generate caption")
+                print(f"Caption Generated: {original_caption}")
             
+            # 3. Nếu use_caption là True, thử đọc từ caption.txt trước
+            elif self.use_caption and image_id is not None:
+                original_caption = get_caption_from_csv(self.csv_path, image_id)
+                if original_caption is not None:
+                    print("Use original caption in captions.txt")
+                    print(f"Original Caption: {original_caption}")
+                else:
+                    # 4. Nếu không tìm thấy trong caption.txt, dùng GIT
+                    if not hasattr(self, 'git_processor'):
+                        self.git_processor, self.git_model = load_git_model(self.device)
+                    
+                    git_image = (image + 1) / 2  # Chuyển từ [-1,1] về [0,1]
+                    inputs = self.git_processor(images=git_image, return_tensors="pt").to(self.device)
+                    with torch.no_grad():
+                        outputs = self.git_model.generate(**inputs, max_length=16)
+                    original_caption = self.git_processor.batch_decode(outputs, skip_special_tokens=True)[0]
+                    print("Original caption is not exists in caption.txt, Use GIT to generate caption")
+                    print(f"Caption Generated: {original_caption}")
+            # 5. Trường hợp cuối cùng: không có gì cả
+            else:
+                # Khởi tạo GIT model nếu chưa có
+                if not hasattr(self, 'git_processor'):
+                    self.git_processor, self.git_model = load_git_model(self.device)
+                
+                git_image = (image + 1) / 2  # Chuyển từ [-1,1] về [0,1]
+                inputs = self.git_processor(images=git_image, return_tensors="pt").to(self.device)
+                with torch.no_grad():
+                    outputs = self.git_model.generate(**inputs, max_length=16)
+                original_caption = self.git_processor.batch_decode(outputs, skip_special_tokens=True)[0]
+                print("Original caption is None, Use GIT to generate caption")
+                print(f"Caption Generated: {original_caption}")
+            # Phần còn lại của hàm defend giữ nguyên
             if original_caption is None:
                 is_adversarial, confidence, attack_type = True, 0.5, "unknown"
             else:
@@ -289,10 +324,10 @@ if __name__ == "__main__":
                         help="Image identifier (e.g., filename) for CSV lookup")
     parser.add_argument("--caption", type=str, 
                         help="Original caption (optional, overrides CSV lookup)")
-    parser.add_argument("--use_csv", action="store_true", default=True,
-                        help="Read captions from CSV file (default: True)")
-    parser.add_argument("--use_git", action="store_true",
-                        help="Use GIT model to generate temporary caption if no caption provided")
+    parser.add_argument("--use_caption", action="store_true", default=True,
+                        help="Read captions from caption.txt file (default: True)")
+    parser.add_argument("--no_caption", action="store_true",
+                        help="Don't use original caption, generate caption using GIT model")
     parser.add_argument("--num_images", type=int, default=1,
                         help="Number of images to process from dataset (default: 1)")
     args = parser.parse_args()
@@ -313,8 +348,8 @@ if __name__ == "__main__":
         tokenizer=tokenizer,
         image_processor=image_processor,
         device=device,
-        use_csv=args.use_csv,
-        use_git=args.use_git
+        use_caption=args.use_caption,
+        no_caption=args.no_caption
     )
     
     # Load dataset
