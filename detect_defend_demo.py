@@ -15,7 +15,7 @@ from utils import predict
 
 class ClipTransformDefender:
     def __init__(self, clip_model, model, model_name, tokenizer, image_processor, 
-                 detection_threshold=0.85, transform_var_threshold=0.08, transform_mean_threshold=0.75,
+                 detection_threshold=0.6, transform_var_threshold=0.1, transform_mean_threshold=0.7,
                  device='cuda', use_caption=True, no_caption=False):
         """
         Initialize ClipTransformDefender with CLIP and captioning models.
@@ -26,9 +26,9 @@ class ClipTransformDefender:
             model_name: Name of the captioning model ('vit-gpt2' or 'blip').
             tokenizer: Tokenizer for the captioning model.
             image_processor: Image processor for the captioning model.
-            detection_threshold: Cosine similarity threshold for semantic consistency (default: 0.85).
-            transform_var_threshold: Variance threshold for transform stability (default: 0.08).
-            transform_mean_threshold: Mean threshold for transform stability (default: 0.75).
+            detection_threshold: Cosine similarity threshold for semantic consistency (default: 0.6).
+            transform_var_threshold: Variance threshold for transform stability (default: 0.1).
+            transform_mean_threshold: Mean threshold for transform stability (default: 0.7).
             device: Device to run models ('cuda' or 'cpu').
             use_caption: Whether to read captions from caption.txt file (default: True).
             no_caption: Whether to use GIT model for generating captions instead of original (default: False).
@@ -62,19 +62,13 @@ class ClipTransformDefender:
     def _jpeg_compress(self, img, quality=90):
         """Apply JPEG compression with specified quality."""
         try:
-            # Đảm bảo tensor có đúng định dạng
             if img.dim() != 3:
                 raise ValueError(f"Expected 3D tensor, got {img.dim()}D")
-            
-            # Chuyển từ [-1,1] về [0,1] cho PIL
             img_normalized = (img + 1) / 2
             img_pil = TF.to_pil_image(img_normalized.cpu())
-            
             buffer = io.BytesIO()
             img_pil.save(buffer, format='JPEG', quality=quality)
             buffer.seek(0)
-            
-            # Chuyển lại về [-1,1]
             compressed = TF.to_tensor(Image.open(buffer)).to(self.device)
             return compressed * 2 - 1
         except Exception as e:
@@ -86,10 +80,9 @@ class ClipTransformDefender:
         try:
             if img.dim() != 3:
                 raise ValueError(f"Expected 3D tensor, got {img.dim()}D")
-            
-            np_img = img.cpu().numpy().transpose(1, 2, 0)  # CHW -> HWC
+            np_img = img.cpu().numpy().transpose(1, 2, 0)
             filtered = ndimage.median_filter(np_img, size=kernel_size)
-            filtered = filtered.transpose(2, 0, 1)  # HWC -> CHW
+            filtered = filtered.transpose(2, 0, 1)
             return torch.from_numpy(filtered).to(self.device)
         except Exception as e:
             print(f"Median filter error: {str(e)}")
@@ -100,7 +93,6 @@ class ClipTransformDefender:
         try:
             if img.dim() != 3:
                 raise ValueError(f"Expected 3D tensor, got {img.dim()}D")
-            
             img = torch.clamp(img, -1, 1)
             max_val = 2**bits - 1
             img_scaled = ((img + 1) / 2 * max_val).round() / max_val
@@ -114,7 +106,6 @@ class ClipTransformDefender:
         try:
             image_resized = TF.resize(image, (224, 224), antialias=True)
             with torch.no_grad():
-                # Check if image is batched (4D) or unbatched (3D)
                 if image_resized.dim() == 3:
                     image_features = self.clip_model.encode_image(image_resized.unsqueeze(0))
                 else:
@@ -145,12 +136,17 @@ class ClipTransformDefender:
                 transform_variance = np.var(transform_similarities) if transform_similarities else 0
                 transform_mean = np.mean(transform_similarities) if transform_similarities else 0
                 
+                print(f"Similarity: {similarity}, Transform variance: {transform_variance}, Transform mean: {transform_mean}")
+                
                 is_semantic_inconsistent = similarity < self.threshold
                 is_unstable_to_transforms = (transform_variance > self.transform_var_threshold or 
                                            transform_mean < self.transform_mean_threshold)
                 
+                if not transform_similarities:
+                    return False, 0.0, "none"
+                
                 if is_semantic_inconsistent and is_unstable_to_transforms:
-                    return True, 0.7 + (1.0 - similarity) * 0.3, "targeted" if similarity < 0.6 else "untargeted"
+                    return True, 0.7 + (1.0 - similarity) * 0.3, "targeted" if similarity < 0.5 else "untargeted"
                 elif is_semantic_inconsistent:
                     return True, 0.6 + (1.0 - similarity) * 0.2, "unknown"
                 else:
@@ -165,60 +161,47 @@ class ClipTransformDefender:
         Defend against adversarial attack by generating a reliable caption.
         """
         try:
-            # Đảm bảo image có đúng định dạng (3D tensor: C, H, W)
             if image.dim() == 4:
-                image = image.squeeze(0)  # Loại bỏ batch dimension nếu có
-            elif image.dim() == 2:
-                raise ValueError("Image tensor should be 3D (C, H, W)")
+                image = image.squeeze(0)
+            elif image.dim() != 3:
+                raise ValueError(f"Expected 3D tensor, got {image.dim()}D")
             
-            # Flow logic theo yêu cầu:
-            # 1. Ưu tiên dùng caption được đưa vào trực tiếp
             if original_caption is not None:
                 print(f"Using provided caption: {original_caption}")
-            
-            # 2. Nếu no_caption là True, dùng GIT để tạo caption (bỏ qua caption.txt)
             elif self.no_caption:
-                # Chuẩn bị image cho GIT (cần format [0,1])
-                git_image = (image + 1) / 2  # Chuyển từ [-1,1] về [0,1]
+                git_image = (image + 1) / 2
                 inputs = self.git_processor(images=git_image, return_tensors="pt").to(self.device)
                 with torch.no_grad():
                     outputs = self.git_model.generate(**inputs, max_length=16)
                 original_caption = self.git_processor.batch_decode(outputs, skip_special_tokens=True)[0]
-                print("Don't use original caption in captions.txt, Use GIT to generate caption")
+                print("Using GIT to generate caption")
                 print(f"Caption Generated: {original_caption}")
-            
-            # 3. Nếu use_caption là True, thử đọc từ caption.txt trước
             elif self.use_caption and image_id is not None:
                 original_caption = get_caption_from_csv(self.csv_path, image_id)
                 if original_caption is not None:
-                    print("Use original caption in captions.txt")
+                    print("Using original caption from captions.txt")
                     print(f"Original Caption: {original_caption}")
                 else:
-                    # 4. Nếu không tìm thấy trong caption.txt, dùng GIT
                     if not hasattr(self, 'git_processor'):
                         self.git_processor, self.git_model = load_git_model(self.device)
-                    
-                    git_image = (image + 1) / 2  # Chuyển từ [-1,1] về [0,1]
+                    git_image = (image + 1) / 2
                     inputs = self.git_processor(images=git_image, return_tensors="pt").to(self.device)
                     with torch.no_grad():
                         outputs = self.git_model.generate(**inputs, max_length=16)
                     original_caption = self.git_processor.batch_decode(outputs, skip_special_tokens=True)[0]
-                    print("Original caption is not exists in caption.txt, Use GIT to generate caption")
+                    print("Original caption not found in captions.txt, using GIT")
                     print(f"Caption Generated: {original_caption}")
-            # 5. Trường hợp cuối cùng: không có gì cả
             else:
-                # Khởi tạo GIT model nếu chưa có
                 if not hasattr(self, 'git_processor'):
                     self.git_processor, self.git_model = load_git_model(self.device)
-                
-                git_image = (image + 1) / 2  # Chuyển từ [-1,1] về [0,1]
+                git_image = (image + 1) / 2
                 inputs = self.git_processor(images=git_image, return_tensors="pt").to(self.device)
                 with torch.no_grad():
                     outputs = self.git_model.generate(**inputs, max_length=16)
                 original_caption = self.git_processor.batch_decode(outputs, skip_special_tokens=True)[0]
-                print("Original caption is None, Use GIT to generate caption")
+                print("No caption provided, using GIT")
                 print(f"Caption Generated: {original_caption}")
-            # Phần còn lại của hàm defend giữ nguyên
+
             if original_caption is None:
                 is_adversarial, confidence, attack_type = True, 0.5, "unknown"
             else:
@@ -235,11 +218,8 @@ class ClipTransformDefender:
                 print(f"Image is clean, returning original caption: {original_caption}")
                 return original_caption, 1.0, defense_info
             
-            # Defense: generate captions from transformed images
             captions = []
             similarities = []
-            
-            # Xử lý tuần tự thay vì đa luồng để tránh lỗi
             for name, transform in self.transformations:
                 try:
                     img_copy = image.clone()
@@ -261,7 +241,6 @@ class ClipTransformDefender:
                 print("No captions generated, returning original or empty caption")
                 return original_caption if original_caption else "", 0.0, defense_info
             
-            # Select best caption based on attack type
             if attack_type == "targeted":
                 caption_counter = Counter(captions)
                 if caption_counter:
@@ -279,7 +258,6 @@ class ClipTransformDefender:
             print(f"Defended caption: {best_caption} with confidence: {confidence}")
             
             return best_caption, confidence, defense_info
-            
         except Exception as e:
             print(f"Defense error: {str(e)[:100]}")
             return original_caption if original_caption else "", 0.0, {'error': str(e)}
@@ -311,7 +289,6 @@ class ClipTransformDefender:
             raise e
 
 if __name__ == "__main__":
-    # Parse command-line arguments
     parser = argparse.ArgumentParser(description="Image-to-Text Adversarial Defense")
     parser.add_argument("--model", type=str, default="vit-gpt2", choices=["vit-gpt2", "blip"],
                         help="Captioning model name (vit-gpt2 or blip)")
@@ -332,14 +309,9 @@ if __name__ == "__main__":
                         help="Number of images to process from dataset (default: 1)")
     args = parser.parse_args()
 
-    # Load CLIP model
     clip_model, clip_preprocess = clip.load("ViT-B/32", device='cuda' if torch.cuda.is_available() else 'cpu')
-    
-    # Load captioning model
-    from utils import load_model
     image_processor, tokenizer, model, _, _, _ = load_model(args.model)
     
-    # Initialize defender
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     defender = ClipTransformDefender(
         clip_model=clip_model,
@@ -350,22 +322,18 @@ if __name__ == "__main__":
         device=device,
         use_caption=args.use_caption,
         no_caption=args.no_caption,
-        detection_threshold=0.75,  # Giảm từ 0.85
-        transform_var_threshold=0.15,  # Tăng từ 0.08
-        transform_mean_threshold=0.65   # Giảm từ 0.75
+        detection_threshold=0.6,  # Giảm ngưỡng
+        transform_var_threshold=0.1,
+        transform_mean_threshold=0.7
     )
     
-    # Load dataset
     dataloader = load_dataset(args.dataset, image_processor, batch_size=1, num_images=args.num_images)
     
-    # Process images
     if args.image_path:
-        # Process single image from path
         image = Image.open(args.image_path).convert('RGB')
-        # Sửa lỗi: Chuyển về [-1,1] thay vì normalize với ImageNet stats
         transform = transforms.Compose([
             transforms.ToTensor(),
-            transforms.Lambda(lambda x: x * 2 - 1)  # [0,1] -> [-1,1]
+            transforms.Lambda(lambda x: x * 2 - 1)
         ])
         image = transform(image).to(device)
         caption, confidence, defense_info = defender.defend(
@@ -378,35 +346,22 @@ if __name__ == "__main__":
         print(f"Confidence: {confidence}")
         print(f"Defense info: {defense_info}")
     else:
-        # Process images from dataset
         for i, batch in enumerate(dataloader):
             if i >= args.num_images:
                 break
-            
-            # Debug information
             print(f"\n=== Debug Batch {i} ===")
             print(f"Batch keys: {batch.keys()}")
             print(f"Image shape: {batch['image'].shape}")
             print(f"Image_id: {batch['image_id']}")
             print(f"Caption: {batch['caption']}")
             
-            # Sửa lỗi: đảm bảo tensor có đúng định dạng
             image = batch['image']
-            if image.dim() == 4:  # Batch dimension
-                image = image[0]  # Lấy ảnh đầu tiên
+            if image.dim() == 4:
+                image = image[0]
             
             image = image.to(device)
-            
-            # Lấy caption và image_id từ batch
-            if args.caption is None:
-                caption = batch['caption'][0] if isinstance(batch['caption'], list) else batch['caption']
-            else:
-                caption = args.caption
-                
-            if args.image_id is None:
-                image_id = batch['image_id'][0] if isinstance(batch['image_id'], list) else batch['image_id']
-            else:
-                image_id = args.image_id
+            caption = batch['caption'][0] if isinstance(batch['caption'], list) else batch['caption']
+            image_id = batch['image_id'][0] if isinstance(batch['image_id'], list) else batch['image_id']
             
             print(f"\nProcessing image {i+1}/{args.num_images} (ID: {image_id})")
             print(f"Ground truth caption: {caption}")
@@ -418,4 +373,4 @@ if __name__ == "__main__":
             )
             print(f"Final caption: {final_caption}")
             print(f"Confidence: {confidence}")
-            print(f"Defense info keys: {list(defense_info.keys())}")
+            print(f"Defense info: {defense_info}")
