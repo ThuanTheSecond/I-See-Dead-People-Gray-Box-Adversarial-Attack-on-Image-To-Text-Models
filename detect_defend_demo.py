@@ -12,6 +12,7 @@ import scipy.ndimage as ndimage
 import argparse
 from utils_detect_defend import load_git_model, get_caption_from_csv, load_dataset
 from utils import predict
+from utils import load_model
 
 class ClipTransformDefender:
     def __init__(self, clip_model, model, model_name, tokenizer, image_processor, 
