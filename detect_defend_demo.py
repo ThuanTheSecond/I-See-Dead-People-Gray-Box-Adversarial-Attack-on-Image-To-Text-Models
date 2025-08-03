@@ -153,6 +153,7 @@ class ClipTransformDefender:
             if original_caption is None and image_id is not None and self.use_csv:
                 # Lookup caption from CSV if enabled and image_id provided
                 original_caption = get_caption_from_csv(self.csv_path, image_id)
+                print("Use original caption in caption.txt")
             
             if original_caption is None and self.use_git:
                 # Generate temporary caption using GIT if enabled
@@ -160,6 +161,7 @@ class ClipTransformDefender:
                 with torch.no_grad():
                     outputs = self.git_model.generate(**inputs, max_length=16)
                 original_caption = self.git_processor.batch_decode(outputs, skip_special_tokens=True)[0]
+                print('Original caption is None, Use GIT to generate caption')
             
             if original_caption is None:
                 # Fallback: assume attack and proceed to defense
