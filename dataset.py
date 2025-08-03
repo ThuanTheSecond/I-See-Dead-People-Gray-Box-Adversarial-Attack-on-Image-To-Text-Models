@@ -47,8 +47,6 @@ class ImageNet(Dataset):
 
 class Flickr30k(Dataset):
     def __init__(self, image_filenames, captions, transform):
-
-
         self.image_filenames = image_filenames
         self.captions = list(captions)
         self.transform = transform
@@ -57,12 +55,12 @@ class Flickr30k(Dataset):
         item = {}
         image = Image.open(f"/kaggle/input/flickr30k/Images/{self.image_filenames[idx]}").convert("RGB")
         if self.transform:
-            image = self.transform(images=image, return_tensors="pt").pixel_values.squeeze(0)
+            # ViT processor sẽ normalize về [-1,1] tự động
+            processed = self.transform(images=image, return_tensors="pt")
+            image = processed.pixel_values.squeeze(0)
         item['image'] = image.float()
         item['caption'] = self.captions[idx]
-
         return item
-
 
     def __len__(self):
         return len(self.captions)

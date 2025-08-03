@@ -349,7 +349,10 @@ if __name__ == "__main__":
         image_processor=image_processor,
         device=device,
         use_caption=args.use_caption,
-        no_caption=args.no_caption
+        no_caption=args.no_caption,
+        detection_threshold=0.75,  # Giảm từ 0.85
+        transform_var_threshold=0.15,  # Tăng từ 0.08
+        transform_mean_threshold=0.65   # Giảm từ 0.75
     )
     
     # Load dataset
@@ -359,9 +362,10 @@ if __name__ == "__main__":
     if args.image_path:
         # Process single image from path
         image = Image.open(args.image_path).convert('RGB')
+        # Sửa lỗi: Chuyển về [-1,1] thay vì normalize với ImageNet stats
         transform = transforms.Compose([
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            transforms.Lambda(lambda x: x * 2 - 1)  # [0,1] -> [-1,1]
         ])
         image = transform(image).to(device)
         caption, confidence, defense_info = defender.defend(
@@ -379,21 +383,39 @@ if __name__ == "__main__":
             if i >= args.num_images:
                 break
             
+            # Debug information
+            print(f"\n=== Debug Batch {i} ===")
+            print(f"Batch keys: {batch.keys()}")
+            print(f"Image shape: {batch['image'].shape}")
+            print(f"Image_id: {batch['image_id']}")
+            print(f"Caption: {batch['caption']}")
+            
             # Sửa lỗi: đảm bảo tensor có đúng định dạng
             image = batch['image']
             if image.dim() == 4:  # Batch dimension
                 image = image[0]  # Lấy ảnh đầu tiên
             
             image = image.to(device)
-            caption = batch['caption'][0] if args.caption is None else args.caption
-            image_id = batch['image_id'][0] if args.image_id is None else args.image_id
+            
+            # Lấy caption và image_id từ batch
+            if args.caption is None:
+                caption = batch['caption'][0] if isinstance(batch['caption'], list) else batch['caption']
+            else:
+                caption = args.caption
+                
+            if args.image_id is None:
+                image_id = batch['image_id'][0] if isinstance(batch['image_id'], list) else batch['image_id']
+            else:
+                image_id = args.image_id
             
             print(f"\nProcessing image {i+1}/{args.num_images} (ID: {image_id})")
-            caption, confidence, defense_info = defender.defend(
+            print(f"Ground truth caption: {caption}")
+            
+            final_caption, confidence, defense_info = defender.defend(
                 image=image,
                 image_id=image_id,
                 original_caption=caption
             )
-            print(f"Final caption: {caption}")
+            print(f"Final caption: {final_caption}")
             print(f"Confidence: {confidence}")
-            print(f"Defense info: {defense_info}")
+            print(f"Defense info keys: {list(defense_info.keys())}")
